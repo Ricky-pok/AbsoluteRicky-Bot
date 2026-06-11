@@ -1,0 +1,7 @@
+node_modules/
+.env
+vision-sa-key.json
+logs.json
+events.json
+http-api.log
+*.log

@@ -1,0 +1,18 @@
+{
+  "name": "bot-receptor",
+  "version": "1.0.0",
+  "main": "index_bot_receptor.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@google-cloud/vision": "^5.3.6",
+    "discord.js": "^14.25.1",
+    "dotenv": "^17.3.1",
+    "express": "^5.2.1"
+  }
+}
