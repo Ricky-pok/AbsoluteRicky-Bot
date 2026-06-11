@@ -1004,26 +1004,35 @@ client.on('messageCreate', async (message) => {
       }
 
       if (command === 'help') {
-        const embed = {
+        const embedGeneral = {
           color: 0x5865f2,
-          title: '📋 Commands',
+          title: '📋 AbsoluteRicky Bot — Commands',
           description: 'Prefix: `$ricky` or `$r`',
           fields: [
-            { name: '`$ricky ping`',                           value: 'Check if the bot is online and show latency.',                                                                    inline: false },
-            { name: '`$ricky help`',                           value: 'Show this list of commands.',                                                                                     inline: false },
-            { name: '`$ricky stats`',                          value: 'Show member and bot count for this server.',                                                                      inline: false },
-            { name: '`$ricky avatar [@user]`',                 value: 'Show the avatar of a user (or yourself).',                                                                        inline: false },
-            { name: '​', value: '**— Moderation —**', inline: false },
-            { name: '`$ricky kick @user [reason]`',            value: 'Kick a member from the server.',                                                                                  inline: false },
-            { name: '`$ricky ban @user [reason]`',             value: 'Ban a member from the server.',                                                                                   inline: false },
-            { name: '`$ricky mute @user [duration] [reason]`', value: 'Mute a member. Duration optional: `30m`, `1h`, `12h`, `1d`, `1mo` (max 30d). If omitted, permanent.',            inline: false },
-            { name: '`$ricky unmute @user`',                   value: 'Remove the mute role from a member.',                                                                             inline: false },
-            { name: '`$ricky mutes`',                          value: 'List all currently muted members in this server with their reason and remaining time. Requires **Manage Roles**.', inline: false },
-            { name: '`$ricky purge [1-50]`',                   value: 'Delete up to 50 messages from this channel.',                                                                     inline: false },
+            // General
+            { name: '┌ 🤖  General', value: '​', inline: false },
+            { name: '`$ricky ping`',          value: 'Check if the bot is online and show latency.',      inline: true },
+            { name: '`$ricky help`',          value: 'Show this command list.',                            inline: true },
+            { name: '`$ricky stats`',         value: 'Show member and bot count for this server.',        inline: true },
+            { name: '`$ricky avatar [@user]`',value: 'Show your avatar or another user\'s.',              inline: true },
+            { name: '`$ricky purge [1-50]`',  value: 'Delete up to 50 messages in this channel.',        inline: true },
+            // Moderation
+            { name: '┌ 🛡️  Moderation', value: '​', inline: false },
+            { name: '`$ricky kick @user [reason]`',            value: 'Kick a member from the server.',                                                                     inline: false },
+            { name: '`$ricky ban @user [reason]`',             value: 'Ban a member from the server.',                                                                      inline: false },
+            { name: '`$ricky mute @user [duration] [reason]`', value: 'Mute a member. Duration optional: `30m`, `2h`, `1d`, `7d` (max 30d). Omit for permanent.',          inline: false },
+            { name: '`$ricky unmute @user`',                   value: 'Remove the mute from a member.',                                                                     inline: false },
+            { name: '`$ricky mutes`',                          value: 'List every currently muted member — reason, who muted them, and time remaining.',                    inline: false },
+            // Graal
+            { name: '┌ 🎮  Graal Online Era', value: '​', inline: false },
+            { name: '`$ricky dc`',                                    value: 'Show a countdown to the next **Double Coins** event, or confirm it\'s currently active.',     inline: false },
+            { name: '`$ricky subscribe <event>`',                     value: 'Subscribe this channel to get pinged when an event starts.\nEvents: `doublecoins` `pvp` `plasma` `all`', inline: false },
+            { name: '`$ricky unsubscribe <event>`',                   value: 'Remove a subscription from this channel.',                                                    inline: false },
+            { name: '`$ricky subscriptions`',                         value: 'Show which events this channel is currently subscribed to.',                                  inline: false },
           ],
-          footer: { text: 'Bot Receptor • use $ricky helpricky for admin commands' },
+          footer: { text: 'AbsoluteRicky Bot • $ricky helpricky for admin/setup commands' },
         };
-        await message.reply({ embeds: [embed] });
+        await message.reply({ embeds: [embedGeneral] });
         return;
       }
 
@@ -1032,22 +1041,29 @@ client.on('messageCreate', async (message) => {
         if (!OWNER_ID || message.author.id !== OWNER_ID) return;
         const embed = {
           color: 0x2b2d31,
-          title: '🔧 Admin Commands',
-          description: 'Prefix: `$ricky` or `$r`',
+          title: '🔧 Admin & Setup Commands',
+          description: 'Prefix: `$ricky` or `$r` — visible only to you',
           fields: [
-            { name: '`$ricky logs [mod|cmd]`',                            value: 'View moderation or command logs (owner only).',                                                                                                                       inline: false },
-            { name: '​', value: '**— LinkGuard / AutoMod —**', inline: false },
-            { name: '`$ricky linkguard on|off`',                          value: 'Enable or disable the AutoMod link scanner for this server.',                                                                                                                   inline: false },
-            { name: '`$ricky linkguard logchannel #channel`',             value: 'Set the channel where AutoMod alerts and logs are sent.',                                                                                                                        inline: false },
-            { name: '`$ricky linkguard modchannel #channel`',             value: 'Set the mod action channel — sends an Unmute/Ban panel when someone is auto-muted. Users unmuted here get 2h immunity from further auto-mutes.',                                inline: false },
-            { name: '`$ricky linkguard muteduration <time|off>`',         value: 'Set how long auto-mutes last (`30m`, `1h`, `12h`, `1d`, max `30d`). Use `off` to make them permanent.',                                                                        inline: false },
-            { name: '`$ricky linkguard status`',                          value: 'Show AutoMod status, log channel, mod channel, and mute duration.',                                                                                                             inline: false },
-            { name: '​', value: '**— Event Notifications —**', inline: false },
-            { name: '`$ricky subscribe <doublecoins|pvp|plasma|all>`',   value: 'Subscribe this channel to game event notifications.',                                                                                                                            inline: false },
-            { name: '`$ricky unsubscribe <doublecoins|pvp|plasma|all>`', value: 'Unsubscribe this channel from game event notifications.',                                                                                                                        inline: false },
-            { name: '`$ricky subscriptions`',                             value: 'Show active event subscriptions for this channel.',                                                                                                                             inline: false },
+            // General admin
+            { name: '┌ 📁  Logs', value: '​', inline: false },
+            { name: '`$ricky logs`',          value: 'View all recent bot logs.',             inline: true },
+            { name: '`$ricky logs mod`',       value: 'View moderation actions only.',        inline: true },
+            { name: '`$ricky logs cmd`',       value: 'View command usage only.',             inline: true },
+            // LinkGuard
+            { name: '┌ 🔗  LinkGuard / AutoMod', value: '​', inline: false },
+            { name: '`$ricky linkguard on`',                          value: 'Enable the scam/phishing/NSFW link scanner for this server.',                                                                inline: false },
+            { name: '`$ricky linkguard off`',                         value: 'Disable the link scanner for this server.',                                                                                  inline: false },
+            { name: '`$ricky linkguard logchannel #channel`',         value: 'Set where AutoMod alerts and audit logs are sent.',                                                                          inline: false },
+            { name: '`$ricky linkguard modchannel #channel`',         value: 'Set the mod action channel — posts an Unmute/Ban panel on every auto-mute. Unmuting from here grants the user 2h immunity.', inline: false },
+            { name: '`$ricky linkguard muteduration <time|off>`',     value: 'How long auto-mutes last: `30m` `1h` `12h` `1d` up to `30d`. Use `off` for permanent.',                                    inline: false },
+            { name: '`$ricky linkguard status`',                      value: 'Show current AutoMod config: enabled, log channel, mod channel, mute duration.',                                            inline: false },
+            // Graal events setup
+            { name: '┌ 🎮  Graal Online Era — Event Setup', value: '​', inline: false },
+            { name: '`$ricky subscribe <event>`',                     value: 'Subscribe this channel to auto-announce events: `doublecoins` `pvp` `plasma` `all`',                                        inline: false },
+            { name: '`$ricky unsubscribe <event>`',                   value: 'Remove a subscription from this channel.',                                                                                   inline: false },
+            { name: '`$ricky subscriptions`',                         value: 'List all active event subscriptions for this channel.',                                                                      inline: false },
           ],
-          footer: { text: 'Admin commands — only visible to you' },
+          footer: { text: 'AbsoluteRicky Bot — admin panel' },
         };
         await message.reply({ embeds: [embed] });
         return;
