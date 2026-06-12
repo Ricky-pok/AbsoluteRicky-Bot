@@ -1,59 +1,89 @@
+// ════════════════════════════════════════════════════════════════════════════════
+// AbsoluteRicky Bot — index_bot_receptor_http.js
+// Bot de Discord con AutoMod (LinkGuard), comandos de moderación, sistema de
+// eventos de Graal Online Era, y API HTTP para notificaciones externas.
+// ════════════════════════════════════════════════════════════════════════════════
+
+// Carga las variables de entorno desde el archivo .env (tokens, IDs, claves API)
 require('dotenv').config();
+
+// Módulos nativos de Node.js para leer/escribir archivos y construir rutas
 const fs = require('fs');
 const path = require('path');
+
+// Express es el servidor HTTP que usamos para recibir alertas desde apps externas
 const express = require('express');
+
+// discord.js — librería principal para conectar con Discord
+// Client: la instancia del bot
+// GatewayIntentBits: permisos de eventos que el bot necesita escuchar
+// ChannelType: tipos de canal (texto, voz, etc.)
+// PermissionFlagsBits: flags de permisos para verificar en interacciones
+// ActionRowBuilder / ButtonBuilder / ButtonStyle: para crear botones en mensajes
 const { Client, GatewayIntentBits, ChannelType, PermissionFlagsBits, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+
+// Google Cloud Vision — API de OCR para leer texto dentro de imágenes adjuntas
 const { ImageAnnotatorClient } = require('@google-cloud/vision');
-const visionClient = new ImageAnnotatorClient();
+const visionClient = new ImageAnnotatorClient(); // cliente listo para hacer llamadas OCR
 
+// ── Servidor HTTP ─────────────────────────────────────────────────────────────
 const app = express();
-const port = Number(process.env.PORT || 3100);
-app.use(express.json());
+const port = Number(process.env.PORT || 3100); // puerto 3100 por defecto
+app.use(express.json()); // permite leer cuerpos JSON en los requests
 
+// ── Cliente de Discord ────────────────────────────────────────────────────────
 const client = new Client({
   intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.Guilds,        // acceso a servidores (guilds)
+    GatewayIntentBits.GuildMessages, // ver mensajes en canales
+    GatewayIntentBits.MessageContent,// leer el contenido de los mensajes (privado por Discord)
+    GatewayIntentBits.GuildMembers,  // acceso a miembros del servidor (para mutes, kicks, etc.)
   ],
 });
 
-const TOKEN_BOT_RECEPTOR = process.env.TOKEN_BOT_RECEPTOR;
-const ID_CANAL_DESTINO = process.env.ID_CANAL_DESTINO;
-const ID_DEL_ROL = process.env.ID_DEL_ROL;
-const ID_PVP_NORMAL_ROL = process.env.ID_PVP_NORMAL_ROL;
-const ID_PVP_EVENT_ROL = process.env.ID_PVP_EVENT_ROL;
-const ALERT_API_TOKEN = process.env.ALERT_API_TOKEN;
-const MONITORED_CHANNEL_ID = process.env.MONITORED_CHANNEL_ID || ID_CANAL_DESTINO;
-const OLD_BOT_USER_ID = process.env.OLD_BOT_USER_ID || '';
-const MUTED_ROLE_ID = process.env.MUTED_ROLE_ID || '';
-const OWNER_ID = process.env.OWNER_ID || '';
-const SAFE_BROWSING_API_KEY = process.env.SAFE_BROWSING_API_KEY || '';
-const IMPORT_BOT_MESSAGES = String(process.env.IMPORT_BOT_MESSAGES || 'true').toLowerCase() !== 'false';
+// ── Variables de entorno ──────────────────────────────────────────────────────
+// Todas vienen del archivo .env en el servidor VM
+const TOKEN_BOT_RECEPTOR   = process.env.TOKEN_BOT_RECEPTOR;   // token del bot de Discord
+const ID_CANAL_DESTINO     = process.env.ID_CANAL_DESTINO;     // canal donde se envían las alertas de Graal
+const ID_DEL_ROL           = process.env.ID_DEL_ROL;           // rol que se menciona en alertas de Double Coins
+const ID_PVP_NORMAL_ROL    = process.env.ID_PVP_NORMAL_ROL;    // rol para alertas de PvP
+const ID_PVP_EVENT_ROL     = process.env.ID_PVP_EVENT_ROL;     // rol para alertas de Plasma Event
+const ALERT_API_TOKEN      = process.env.ALERT_API_TOKEN;      // token de autenticación para la API HTTP
+const MONITORED_CHANNEL_ID = process.env.MONITORED_CHANNEL_ID || ID_CANAL_DESTINO; // canal que el bot monitorea para importar eventos
+const OLD_BOT_USER_ID      = process.env.OLD_BOT_USER_ID || '';   // si se pone, solo importa mensajes de ese bot específico
+const MUTED_ROLE_ID        = process.env.MUTED_ROLE_ID || '';     // ID fijo del rol muted (opcional, si no se usa búsqueda por nombre)
+const OWNER_ID             = process.env.OWNER_ID || '';           // ID del dueño del bot (para comandos privados como $ricky logs)
+const SAFE_BROWSING_API_KEY= process.env.SAFE_BROWSING_API_KEY || ''; // clave de Google Safe Browsing (opcional, para detección extra)
+const IMPORT_BOT_MESSAGES  = String(process.env.IMPORT_BOT_MESSAGES || 'true').toLowerCase() !== 'false'; // si debe importar mensajes de bots del canal monitoreado
 
-const PREFIX = '$ricky';
+// Prefijos que activan comandos del bot
+const PREFIX       = '$ricky';
 const PREFIX_SHORT = '$r';
 
+// Si faltan las variables críticas, el bot no puede funcionar — abortar
 if (!TOKEN_BOT_RECEPTOR || !ID_CANAL_DESTINO) {
   console.error('❌ Missing required environment variables: TOKEN_BOT_RECEPTOR and ID_CANAL_DESTINO are required.');
   process.exit(1);
 }
 
-const EVENTS_FILE = path.join(__dirname, 'events.json');
-const DEVICES_FILE = path.join(__dirname, 'devices.json');
-const CHANNELS_FILE = path.join(__dirname, 'channels.json');
-const LOGS_FILE = path.join(__dirname, 'logs.json');
-const AUTOMOD_FILE = path.join(__dirname, 'automod.json');
-const MAX_EVENTS = 100;
-const _htmlCache = {};
-const MAX_DEVICES = 200;
+// ── Rutas a archivos JSON de persistencia ────────────────────────────────────
+// Todos los datos se guardan en archivos JSON en la misma carpeta del bot
+const EVENTS_FILE  = path.join(__dirname, 'events.json');   // historial de eventos de Graal
+const DEVICES_FILE = path.join(__dirname, 'devices.json');  // dispositivos iOS registrados para push
+const CHANNELS_FILE= path.join(__dirname, 'channels.json'); // canales suscritos a eventos
+const LOGS_FILE    = path.join(__dirname, 'logs.json');     // logs de comandos y moderación
+const AUTOMOD_FILE = path.join(__dirname, 'automod.json');  // configuración de AutoMod por servidor
+const MAX_EVENTS   = 100;   // máximo de eventos guardados en memoria/disco
+const _htmlCache   = {};    // caché en memoria de las páginas HTML estáticas (tos, privacy)
+const MAX_DEVICES  = 200;   // máximo de dispositivos registrados
 
 // ── Rate Limiting ─────────────────────────────────────────────────────────────
+// Evita que un usuario spam-use comandos. Máximo 10 comandos por minuto.
+// Si lo supera, queda bloqueado 60 segundos adicionales.
 const RATE_LIMIT_WINDOW   = 60_000;  // ventana de 60 segundos
 const RATE_LIMIT_MAX      = 10;      // máximo 10 comandos por ventana
 const RATE_LIMIT_COOLDOWN = 60_000;  // bloqueado 60s si supera el límite
-const _rateLimits = new Map();
+const _rateLimits = new Map();       // userId → { count, windowStart, blockedUntil }
 
 // Limpia entradas expiradas cada 5 minutos para no acumular memoria
 setInterval(() => {
@@ -65,6 +95,7 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000);
 
+// Retorna true si el usuario está bloqueado por rate limit
 function isRateLimited(userId) {
   const now = Date.now();
   const entry = _rateLimits.get(userId) || { count: 0, windowStart: now, blockedUntil: 0 };
@@ -78,9 +109,10 @@ function isRateLimited(userId) {
     return false;
   }
 
-  // Incrementar dentro de la ventana
+  // Incrementar contador dentro de la ventana actual
   entry.count++;
   if (entry.count > RATE_LIMIT_MAX) {
+    // Supera el límite — bloquear por RATE_LIMIT_COOLDOWN ms
     entry.blockedUntil = now + RATE_LIMIT_COOLDOWN;
     _rateLimits.set(userId, entry);
     return true;
@@ -92,161 +124,185 @@ function isRateLimited(userId) {
 // ── Fin Rate Limiting ─────────────────────────────────────────────────────────
 
 
-// Debounced async file writer — avoids blocking the event loop on every mutation
+// ── Sistema de escritura a disco (debounced) ──────────────────────────────────
+// Agrupa múltiples cambios rápidos en una sola escritura para no saturar el disco.
+// Si se llama varias veces seguidas, reinicia el timer — solo escribe 800ms después
+// del último cambio. Así evitamos escribir el archivo 50 veces por segundo.
 const _saveTimers = {};
 function debouncedWrite(key, file, getData, delay = 800) {
-  clearTimeout(_saveTimers[key]);
+  clearTimeout(_saveTimers[key]);                              // cancela escritura pendiente anterior
   _saveTimers[key] = setTimeout(() => {
-    fs.writeFile(file, JSON.stringify(getData(), null, 2), (err) => {
+    fs.writeFile(file, JSON.stringify(getData(), null, 2), (err) => { // escribe el JSON con formato bonito
       if (err) console.error(`❌ Failed to save ${key}:`, err.message);
     });
   }, delay);
 }
 
+// Carga un archivo JSON del disco. Si no existe o está corrupto, retorna []
 function loadJsonArray(file) {
   try {
     const raw = fs.readFileSync(file, 'utf8');
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    return Array.isArray(parsed) ? parsed : []; // asegura que siempre sea array
   } catch {
-    return [];
+    return []; // si falla, empieza vacío
   }
 }
 
-let events = loadJsonArray(EVENTS_FILE);
-let registeredDevices = loadJsonArray(DEVICES_FILE);
-let subscribedChannels = loadJsonArray(CHANNELS_FILE);
+// ── Datos en memoria cargados desde disco al iniciar ─────────────────────────
+let events           = loadJsonArray(EVENTS_FILE);   // historial de eventos de Graal
+let registeredDevices= loadJsonArray(DEVICES_FILE);  // dispositivos push registrados
+let subscribedChannels = loadJsonArray(CHANNELS_FILE); // canales suscritos a notificaciones
 
-let botLogs = loadJsonArray(LOGS_FILE);
-const MAX_LOGS = 200;
+let botLogs = loadJsonArray(LOGS_FILE); // logs de moderación y comandos
+const MAX_LOGS = 200;                   // máximo de entradas que guardamos
 
 function saveLogs() {
   debouncedWrite('logs', LOGS_FILE, () => botLogs);
 }
 
-// Registra un evento de comando o moderación
+// Agrega una entrada al log. type puede ser 'mod' (moderación) o 'command' (comandos)
+// data es un objeto con los detalles (quién, qué, cuándo, en qué servidor)
 function addLog(type, data) {
   botLogs = [{ type, ...data, at: new Date().toISOString() }, ...botLogs].slice(0, MAX_LOGS);
   saveLogs();
 }
 
+// Carga la configuración de AutoMod desde disco al arrancar.
+// Es un objeto donde cada clave es un guildId: { enabled, logChannelId, modAlertChannelId, muteDuration }
 let automodConfig = (() => {
   try { const r = fs.readFileSync(AUTOMOD_FILE, 'utf8'); const p = JSON.parse(r); return (p && typeof p === 'object' && !Array.isArray(p)) ? p : {}; } catch { return {}; }
 })();
 
-// userId_guildId -> timestamp when immunity expires (set after manual unmute via button)
+// ── Sistema de inmunidad post-unmute ─────────────────────────────────────────
+// Cuando un mod desmutea a alguien manualmente desde el panel de botones,
+// ese usuario queda inmune durante 2 horas: el AutoMod lo detecta pero NO lo mutea,
+// solo deja pasar el mensaje y registra en el log que fue skipped por inmunidad.
+// Esto evita que el bot remutee a alguien que el mod acaba de liberar.
+
+// userId_guildId -> timestamp when immunity expires
 const immuneUsers = new Map();
+
+// Retorna true si el usuario tiene inmunidad activa en ese servidor
 function isImmune(userId, guildId) {
   const key = userId + '_' + guildId;
   const until = immuneUsers.get(key);
   if (!until) return false;
-  if (Date.now() >= until) { immuneUsers.delete(key); return false; }
+  if (Date.now() >= until) { immuneUsers.delete(key); return false; } // ya expiró — limpiar
   return true;
 }
+
+// Activa la inmunidad por 2 horas para el usuario en ese servidor
 function setImmune(userId, guildId) {
   immuneUsers.set(userId + '_' + guildId, Date.now() + 2 * 60 * 60 * 1000);
 }
 
-// Parsea strings de duración: "30s", "5m", "2h", "1d", "1h30m", etc.
-// Retorna milisegundos o null si el formato no es válido
-const MAX_MUTE_MS = 30 * 24 * 60 * 60 * 1000; // 30 días
+// ── Duración de mutes ─────────────────────────────────────────────────────────
+const MAX_MUTE_MS = 30 * 24 * 60 * 60 * 1000; // límite máximo: 30 días en ms
 
+// Convierte un string de duración a milisegundos.
+// Soporta: "30s" "5m" "2h" "1d" "1h30m" "2d12h" etc.
+// Retorna null si el formato no es válido o la duración es cero.
 function parseDuration(str) {
   if (!str) return null;
   const re = /^(?:(d+)d)?(?:(d+)h)?(?:(d+)m)?(?:(d+)s)?$/i;
   const m = str.trim().match(re);
   if (!m || !str.trim()) return null;
   const [, d, h, min, s] = m.map(Number);
+  // convierte cada parte a ms y suma todo
   const ms = ((d||0)*86400 + (h||0)*3600 + (min||0)*60 + (s||0)) * 1000;
-  return ms > 0 ? Math.min(ms, MAX_MUTE_MS) : null;
+  return ms > 0 ? Math.min(ms, MAX_MUTE_MS) : null; // nunca supera 30 días
 }
 
-// Formatea milisegundos a string legible: "1h 30m", "2d", "45m", etc.
+// Convierte milisegundos a string legible: "1h 30m", "2d", "45m", etc.
 function formatDuration(ms) {
   const d = Math.floor(ms / 86400000);
   const h = Math.floor((ms % 86400000) / 3600000);
   const m = Math.floor((ms % 3600000) / 60000);
   const s = Math.floor((ms % 60000) / 1000);
+  // filtra los ceros (ej: si d=0, no aparece "0d")
   return [d&&`${d}d`, h&&`${h}h`, m&&`${m}m`, s&&`${s}s`].filter(Boolean).join(' ');
 }
 
-// userId_guildId -> timeoutId. Permite cancelar un mute temporal si se desmutea antes.
+// ── Registro de mutes activos y timers ───────────────────────────────────────
+
+// userId_guildId → ID del setTimeout. Sirve para cancelar el timer si se desmutea antes de que expire.
 const muteTimers = new Map();
 
-// userId_guildId -> { reason, mutedBy, mutedAt, expiresAt|null }. Registro de mutes activos.
+// userId_guildId → { reason, mutedBy, mutedAt, expiresAt|null }
+// Registro en memoria de todos los mutes activos. Lo usa $ricky mutes para mostrar la lista.
 const activeMutes = new Map();
 
-// Programa la remoción automática del rol muted después de durationMs
+// Programa la remoción automática del rol muted después de durationMs milisegundos.
+// Si ya había un timer para ese usuario, lo cancela primero para evitar doble unmute.
 function scheduleMuteExpiry(member, role, durationMs) {
   const key = member.id + '_' + member.guild.id;
-  if (muteTimers.has(key)) clearTimeout(muteTimers.get(key));
+  if (muteTimers.has(key)) clearTimeout(muteTimers.get(key)); // cancela timer anterior
   const timer = setTimeout(async () => {
-    muteTimers.delete(key);
-    activeMutes.delete(key);
+    muteTimers.delete(key);  // borra el timer del mapa
+    activeMutes.delete(key); // borra el registro del mute activo
     try {
-      await member.guild.members.fetch(member.id);
+      await member.guild.members.fetch(member.id); // refresca el miembro desde Discord
       const freshMember = member.guild.members.cache.get(member.id);
       if (freshMember && freshMember.roles.cache.has(role.id)) {
-        await freshMember.roles.remove(role, 'Mute duration expired');
+        await freshMember.roles.remove(role, 'Mute duration expired'); // quita el rol muted
         console.log(`⏱️ Auto-unmuted ${member.user.tag} in ${member.guild.name} (duration expired)`);
       }
     } catch (err) {
       console.error('❌ Auto-unmute failed:', err.message);
     }
   }, durationMs);
-  muteTimers.set(key, timer);
+  muteTimers.set(key, timer); // guarda el timer para poder cancelarlo si se desmutea antes
 }
 
-function saveAutomod() {
-  debouncedWrite('automod', AUTOMOD_FILE, () => automodConfig);
-}
+// Funciones de guardado — cada una llama a debouncedWrite con su archivo correspondiente
+function saveAutomod()   { debouncedWrite('automod',   AUTOMOD_FILE,   () => automodConfig); }
+function saveChannels()  { debouncedWrite('channels',  CHANNELS_FILE,  () => subscribedChannels); }
+function saveEvents()    { debouncedWrite('events',    EVENTS_FILE,    () => events); }
+function saveDevices()   { debouncedWrite('devices',   DEVICES_FILE,   () => registeredDevices); }
 
-function saveChannels() {
-  debouncedWrite('channels', CHANNELS_FILE, () => subscribedChannels);
-}
+// Set con los IDs de mensajes de Discord ya procesados como eventos.
+// Evita importar el mismo evento dos veces si el bot se reinicia.
 const seenDiscordMessageIds = new Set(
   events.map((event) => event.discordMessageId).filter(Boolean)
 );
 
-function saveEvents() {
-  debouncedWrite('events', EVENTS_FILE, () => events);
-}
-
-function saveDevices() {
-  debouncedWrite('devices', DEVICES_FILE, () => registeredDevices);
-}
-
+// Crea y guarda un nuevo evento (Double Coins, PvP, Plasma, etc.)
+// extra puede incluir: id personalizado, source, createdAt, discordMessageId
 function addEvent(type, title, body, extra = {}) {
   const event = {
-    id: extra.id || `evt_${Date.now()}`,
-    type,
+    id: extra.id || `evt_${Date.now()}`,   // ID único, puede venir de afuera (ej: discord_<messageId>)
+    type,                                   // 'doublecoins' | 'pvp_normal' | 'plasma_event'
     title,
     body,
-    source: extra.source || 'http-api',
+    source: extra.source || 'http-api',    // de dónde vino: 'http-api' o 'discord:<userId>'
     createdAt: extra.createdAt || new Date().toISOString(),
     discordMessageId: extra.discordMessageId || null,
   };
 
-  if (event.discordMessageId) {
-    seenDiscordMessageIds.add(event.discordMessageId);
-  }
+  // Registra el ID para no volver a importarlo
+  if (event.discordMessageId) seenDiscordMessageIds.add(event.discordMessageId);
 
+  // Pone el nuevo evento al principio y descarta los más viejos si supera MAX_EVENTS
   events = [event, ...events.filter((existing) => existing.id !== event.id)].slice(0, MAX_EVENTS);
   saveEvents();
   return event;
 }
 
+// Registra o actualiza un dispositivo iOS para notificaciones push.
+// Si el token ya existía, lo actualiza (updatedAt); si no, lo agrega al inicio.
 function registerDevice({ token, platform, appBundleId, environment }) {
   const now = new Date().toISOString();
   const device = {
     token,
-    platform: platform || 'unknown',
-    appBundleId: appBundleId || 'unknown',
-    environment: environment || 'unknown',
+    platform:     platform     || 'unknown',
+    appBundleId:  appBundleId  || 'unknown',
+    environment:  environment  || 'unknown',
     registeredAt: now,
-    updatedAt: now,
+    updatedAt:    now,
   };
 
+  // Merge con el registro existente si ya había uno con ese token
   registeredDevices = [
     { ...device, ...(registeredDevices.find((existing) => existing.token === token) || {}), updatedAt: now },
     ...registeredDevices.filter((existing) => existing.token !== token),
@@ -256,6 +312,9 @@ function registerDevice({ token, platform, appBundleId, environment }) {
   return registeredDevices[0];
 }
 
+// Middleware de autenticación para los endpoints HTTP.
+// Si ALERT_API_TOKEN está configurado, exige un header "Authorization: Bearer <token>".
+// Si no está configurado, deja pasar todo (modo sin autenticación).
 function requireAuth(req, res, next) {
   if (!ALERT_API_TOKEN) return next();
   const header = req.get('authorization') || '';
@@ -264,6 +323,8 @@ function requireAuth(req, res, next) {
   next();
 }
 
+// Envía un mensaje al canal principal de Graal (ID_CANAL_DESTINO).
+// Si se pasa roleId, menciona ese rol antes del contenido.
 async function sendAlert(roleId, content) {
   const canal = await client.channels.fetch(ID_CANAL_DESTINO);
   if (!canal) throw new Error('Canal destino no encontrado');
@@ -271,15 +332,20 @@ async function sendAlert(roleId, content) {
   await canal.send(`${prefix}${content}`.trim());
 }
 
+// Orquesta el envío de una alerta de Graal desde la API HTTP:
+// 1. Aplica decoración opcional al texto (ej: agregar emojis)
+// 2. Envía al canal principal con mención de rol
+// 3. Broadcast a todos los canales suscritos en otros servidores
+// 4. Guarda el evento en el historial
 async function handleAlert({ type, title, body, roleId, decorate }) {
   const content = decorate ? decorate(body) : body;
-  // Envía al canal principal con mención de rol
-  await sendAlert(roleId, content);
-  // Broadcast a canales suscritos (sin mención de rol, son otros servidores)
-  await broadcastEvent(type, content);
+  await sendAlert(roleId, content);         // canal principal con @rol
+  await broadcastEvent(type, content);      // otros servidores suscritos (sin @rol)
   return addEvent(type, title, body, { source: 'http-api' });
 }
 
+// Limpia el texto de un mensaje Discord para analizarlo:
+// quita menciones de rol (@&123...), colapsa espacios múltiples, trim
 function normalizeContent(text) {
   return String(text || '')
     .replace(/<@&\d+>/g, ' ')
@@ -287,64 +353,60 @@ function normalizeContent(text) {
     .trim();
 }
 
+// Detecta si un mensaje de Discord es un evento de Graal Online Era y lo clasifica.
+// Busca palabras clave específicas de los mensajes que manda el juego.
+// Retorna { type, title, body } o null si no es un evento reconocido.
 function classifyDiscordMessage(text) {
   const normalized = normalizeContent(text);
   const lower = normalized.toLowerCase();
 
   if (lower.includes('double coins')) {
-    return {
-      type: 'doublecoins',
-      title: 'Double Coins',
-      body: normalized,
-    };
+    return { type: 'doublecoins', title: 'Double Coins', body: normalized };
   }
 
   if (lower.includes('antimatter pvp arena') || lower.includes('pvp arena has opened')) {
-    return {
-      type: 'pvp_normal',
-      title: 'PvP Normal',
-      body: normalized,
-    };
+    return { type: 'pvp_normal', title: 'PvP Normal', body: normalized };
   }
 
   if (lower.includes('plasma events are being hosted') || lower.includes('join to win some shiny plasma coins')) {
-    return {
-      type: 'plasma_event',
-      title: 'Plasma Event',
-      body: normalized,
-    };
+    return { type: 'plasma_event', title: 'Plasma Event', body: normalized };
   }
 
-  return null;
+  return null; // mensaje no es un evento de Graal
 }
 
+// Decide si el bot debe importar este mensaje de Discord como evento.
+// Filtros: importación habilitada, canal correcto, bot correcto, no visto antes.
 function shouldImportDiscordMessage(message) {
-  if (!IMPORT_BOT_MESSAGES) return false;
-  if (!message?.author) return false;
-  if (message.channelId !== MONITORED_CHANNEL_ID) return false;
-  if (OLD_BOT_USER_ID && message.author.id !== OLD_BOT_USER_ID) return false;
-  if (!OLD_BOT_USER_ID && !message.author.bot) return false;
-  if (seenDiscordMessageIds.has(message.id)) return false;
+  if (!IMPORT_BOT_MESSAGES) return false;                                      // importación desactivada en .env
+  if (!message?.author) return false;                                          // mensaje sin autor (raro)
+  if (message.channelId !== MONITORED_CHANNEL_ID) return false;               // no es el canal monitoreado
+  if (OLD_BOT_USER_ID && message.author.id !== OLD_BOT_USER_ID) return false; // no es el bot específico configurado
+  if (!OLD_BOT_USER_ID && !message.author.bot) return false;                  // si no hay bot específico, solo acepta bots
+  if (seenDiscordMessageIds.has(message.id)) return false;                    // ya fue procesado antes
   return true;
 }
 
-// Mapeo de aliases de eventos a tipos internos
+// ── Sistema de eventos de Graal Online Era ────────────────────────────────────
+
+// Aliases para que $ricky subscribe acepte nombres amigables como "dc", "pvp", "plasma"
 const EVENT_ALIASES = {
   doublecoins: 'doublecoins',
-  dc: 'doublecoins',
-  pvp: 'pvp_normal',
-  pvpnormal: 'pvp_normal',
-  plasma: 'plasma_event',
+  dc:           'doublecoins',      // alias corto para Double Coins
+  pvp:          'pvp_normal',
+  pvpnormal:    'pvp_normal',
+  plasma:       'plasma_event',
   'plasma-event': 'plasma_event',
 };
-const ALL_EVENT_TYPES = ['doublecoins', 'pvp_normal', 'plasma_event'];
+const ALL_EVENT_TYPES = ['doublecoins', 'pvp_normal', 'plasma_event']; // todos los tipos existentes
 const EVENT_LABELS = {
-  doublecoins: 'Double Coins',
-  pvp_normal: 'PvP Normal',
+  doublecoins:  'Double Coins',
+  pvp_normal:   'PvP Normal',
   plasma_event: 'Plasma Event',
 };
 
-// Envía un mensaje a todos los canales suscritos a ese tipo de evento
+// Manda el contenido del evento a todos los canales que estén suscritos a ese tipo.
+// Se usa tanto cuando llega un evento por API HTTP como cuando se detecta en Discord.
 async function broadcastEvent(eventType, content) {
   const targets = subscribedChannels.filter((c) => c.events.includes(eventType));
   await Promise.all(targets.map(async (target) => {
@@ -380,24 +442,27 @@ const NSFW_DOMAINS = new Set([
   'sex.com','xart.com','met-art.com','hegre.com',
 ]);
 
-// TLDs exclusivos de contenido adulto
+// TLD (.xxx .porn .adult .sex .sexy .nude) — cualquier URL con estos sufijos es NSFW
 const ADULT_TLD_PATTERN = /\.(?:xxx|porn|adult|sex|sexy|nude)(?:[/?#]|$)/i;
 
-// Palabras clave NSFW en subdominio o ruta de la URL
+// Palabras que en el subdominio o ruta de una URL indican contenido adulto
 const NSFW_URL_KEYWORDS = ['porn','xxx','hentai','nsfw','nude','naked','onlyfan','chaturbat','camgirl'];
 
-// Lista viva de dominios maliciosos (cargada desde GitHub cada 6h)
+// Lista viva de dominios maliciosos — se actualiza cada 6h desde GitHub.
+// Combina dos listas públicas: Discord-AntiScam y discord-phishing-links (~39k dominios)
 let liveBlocklist = new Set();
 
+// Descarga las dos listas desde GitHub y reconstruye liveBlocklist.
+// Se llama al arrancar y luego cada 6 horas automáticamente.
 async function refreshLiveBlocklist() {
   try {
-    const FETCH_TIMEOUT = AbortSignal.timeout(10000);
     const [scamRes, phishRes] = await Promise.all([
       fetch('https://raw.githubusercontent.com/Discord-AntiScam/scam-links/main/list.json', { signal: AbortSignal.timeout(10000) }),
       fetch('https://raw.githubusercontent.com/nikolaischunk/discord-phishing-links/main/domain-list.json', { signal: AbortSignal.timeout(10000) }),
     ]);
     const scamList  = await scamRes.json();
     const phishData = await phishRes.json();
+    // Combina ambas listas en un Set para búsqueda O(1)
     liveBlocklist = new Set([
       ...(Array.isArray(scamList) ? scamList : []),
       ...(Array.isArray(phishData.domains) ? phishData.domains : []),
@@ -408,7 +473,8 @@ async function refreshLiveBlocklist() {
   }
 }
 
-// Verifica si un hostname está en la lista viva (exacto o subdominio)
+// Verifica si un hostname está en la lista viva, revisando también subdominios.
+// Ejemplo: "evil.discord.com" → chequea "evil.discord.com" y "discord.com"
 function isInLiveBlocklist(hostname) {
   if (liveBlocklist.has(hostname)) return true;
   const parts = hostname.split('.');
@@ -418,8 +484,9 @@ function isInLiveBlocklist(hostname) {
   return false;
 }
 
-// Consulta Google Safe Browsing API (solo si SAFE_BROWSING_API_KEY está configurado)
-// Batch Safe Browsing: checks all URLs in a single API call
+// Consulta Google Safe Browsing API con todas las URLs de un mensaje en una sola llamada.
+// Es opcional — solo se activa si SAFE_BROWSING_API_KEY está en el .env.
+// Detecta malware, phishing y software no deseado que no estén en nuestras listas locales.
 async function checkSafeBrowsingBatch(urls) {
   if (!SAFE_BROWSING_API_KEY || !urls.length) return [];
   try {
@@ -428,24 +495,24 @@ async function checkSafeBrowsingBatch(urls) {
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        signal: AbortSignal.timeout(6000),
+        signal: AbortSignal.timeout(6000), // timeout de 6 segundos para no bloquear el bot
         body: JSON.stringify({
           client: { clientId: 'discord-bot', clientVersion: '1.0' },
           threatInfo: {
             threatTypes: ['MALWARE', 'SOCIAL_ENGINEERING', 'UNWANTED_SOFTWARE'],
             platformTypes: ['ANY_PLATFORM'],
             threatEntryTypes: ['URL'],
-            threatEntries: urls.map(url => ({ url })),
+            threatEntries: urls.map(url => ({ url })), // todas las URLs del mensaje a la vez
           },
         }),
       }
     );
     const data = await res.json();
-    return data.matches || [];
+    return data.matches || []; // retorna los matches encontrados (o [] si está limpio)
   } catch { return []; }
 }
 
-// Fragmentos de dominio asociados a scam
+// Fragmentos que suelen aparecer en dominios de scam (Nitro falso, Steam fake, robux, etc.)
 const SCAM_DOMAIN_FRAGMENTS = [
   'discordnitro','discord-nitro','free-nitro','nitro-discord','discord-gift',
   'discordgift','nitro-free','freenitro','claimnitro','nitroclaim','getnitro',
@@ -482,22 +549,27 @@ const SCAM_TEXT_PATTERNS = [
   { re: /enter\s+(the\s+)?special\s+promo\s+code/i,               label: 'Fake Promo Code Scam' },
 ];
 
-// Caché de invites revisados para no spamear la API de Discord
+// Caché para no consultar la API de Discord cada vez que aparece el mismo invite.
+// Se guarda el resultado por 5 minutos (INVITE_CACHE_TTL).
 const inviteCache = new Map();
 const INVITE_CACHE_TTL = 5 * 60 * 1000;
 
-// Normaliza un hostname para detectar leetspeak y unicode obfuscation
+// Convierte un hostname a forma canónica para comparación.
+// Elimina caracteres invisibles, unicode confusables, y convierte leetspeak a letras normales.
+// Ejemplo: "d1sc0rd.com" → "discord.com"
 function normalizeDomain(domain) {
   return domain
     .toLowerCase()
-    .normalize('NFKC')
-    .replace(/[​-‍؜᠎﻿­]/g, '')
+    .normalize('NFKC')                          // normaliza Unicode (ej: caracteres griegos que parecen latinos)
+    .replace(/[​-‍؜᠎﻿­]/g, '')               // elimina caracteres invisibles usados para evadir filtros
     .replace(/0/g, 'o').replace(/1/g, 'i').replace(/3/g, 'e')
     .replace(/4/g, 'a').replace(/5/g, 's').replace(/7/g, 't')
-    .replace(/@/g, 'a');
+    .replace(/@/g, 'a');                        // @ se puede usar en lugar de 'a' en leetspeak
 }
 
-// Levenshtein para detectar typosquatting
+// Algoritmo de Levenshtein — mide la "distancia" entre dos strings.
+// Cuántas letras hay que cambiar/agregar/borrar para ir de 'a' a 'b'.
+// Se usa para detectar typosquatting (ej: "discrod.com" vs "discord.com" = distancia 1)
 function levenshtein(a, b) {
   const dp = Array.from({ length: a.length + 1 }, (_, i) => [i]);
   for (let j = 0; j <= b.length; j++) dp[0][j] = j;
@@ -509,12 +581,14 @@ function levenshtein(a, b) {
   return dp[a.length][b.length];
 }
 
-// Verifica si un hostname hace typosquatting de un dominio confiable
+// Compara el hostname normalizado contra cada dominio confiable.
+// Si la distancia es <= 2 (casi igual pero no exacto), es typosquatting.
+// Retorna un objeto de violación o null si es legítimo.
 function checkTyposquatting(hostname) {
   const norm = normalizeDomain(hostname);
   for (const trusted of TRUSTED_DOMAINS) {
     const normTrusted = normalizeDomain(trusted);
-    if (norm === normTrusted) return null;
+    if (norm === normTrusted) return null; // es el dominio real — seguro
     if (levenshtein(norm, normTrusted) <= 2) {
       return { type: 'phishing', label: `Phishing — spoofing ${trusted}`, url: hostname };
     }
@@ -522,30 +596,34 @@ function checkTyposquatting(hostname) {
   return null;
 }
 
-// Verifica un invite de Discord via API (con caché de 5 min)
+// Verifica si un código de invite de Discord apunta a un servidor NSFW.
+// Usa caché de 5 minutos para no abusar la API de Discord con el mismo código.
+// nsfwLevel: DEFAULT=0, EXPLICIT=1 (bloqueado), SAFE=2, AGE_RESTRICTED=3 (bloqueado)
 async function checkDiscordInvite(code) {
   const cached = inviteCache.get(code);
-  if (cached && Date.now() - cached.ts < INVITE_CACHE_TTL) return cached.result;
+  if (cached && Date.now() - cached.ts < INVITE_CACHE_TTL) return cached.result; // retorna desde caché
   try {
     const invite = await client.fetchInvite(code);
     let result = null;
     if (invite.guild) {
-      // nsfwLevel: DEFAULT=0, EXPLICIT=1, SAFE=2, AGE_RESTRICTED=3
       if (invite.guild.nsfwLevel === 1 || invite.guild.nsfwLevel === 3) {
         result = { type: 'nsfw_invite', label: 'NSFW Discord Server Invite', url: `discord.gg/${code}` };
       }
     }
-    if (inviteCache.size >= 500) inviteCache.delete(inviteCache.keys().next().value);
+    if (inviteCache.size >= 500) inviteCache.delete(inviteCache.keys().next().value); // evita crecer infinito
     inviteCache.set(code, { result, ts: Date.now() });
     return result;
   } catch {
     if (inviteCache.size >= 500) inviteCache.delete(inviteCache.keys().next().value);
-    inviteCache.set(code, { result: null, ts: Date.now() });
+    inviteCache.set(code, { result: null, ts: Date.now() }); // cachea el error también (invite inválido = no NSFW)
     return null;
   }
 }
 
-// Detecta porno o scam en un mensaje
+// ── detectViolation — motor principal de detección ───────────────────────────
+// Analiza el contenido de un mensaje de texto y detecta NSFW o scam.
+// Pasa por 10 capas de detección en orden de velocidad (las más rápidas primero).
+// Retorna { type, label, url } si encontró algo, o null si está limpio.
 async function detectViolation(content) {
   const urls = content.match(/https?:\/\/[^\s<>"']+/gi) || [];
   const safeBrowsingCandidates = [];
@@ -629,6 +707,8 @@ async function detectViolation(content) {
   return null;
 }
 
+// Llama a Google Cloud Vision para extraer todo el texto visible en una imagen.
+// Retorna el texto como string, o '' si la imagen no tiene texto o falla la API.
 async function extractTextFromImage(imageUrl) {
   try {
     const [result] = await visionClient.textDetection({ image: { source: { imageUri: imageUrl } } });
@@ -639,6 +719,8 @@ async function extractTextFromImage(imageUrl) {
   }
 }
 
+// Analiza todas las imágenes adjuntas a un mensaje buscando links o texto scam via OCR.
+// Procesa todas en paralelo (Promise.all) y retorna la primera violación encontrada.
 async function detectViolationInImages(attachments) {
   const images = attachments.filter(a => {
     const ct = a.contentType ?? a.content_type ?? '';
@@ -660,9 +742,10 @@ async function detectViolationInImages(attachments) {
 }
 
 
-// Versión restringida para texto extraído por OCR.
-// Solo chequea URLs y dominios explícitos — omite patrones de texto para
-// evitar falsos positivos con frases legítimas de apps ("Claim your reward", etc.)
+// Versión RESTRINGIDA de detección para texto de OCR (imágenes).
+// NO aplica SCAM_TEXT_PATTERNS — frases como "Claim your reward" aparecen en apps
+// legítimas (ej: Graal Online) y causarían falsos positivos masivos en screenshots.
+// Solo analiza URLs con https:// y dominios escritos en el texto de la imagen.
 async function detectViolationFromOCR(text) {
   const urls = text.match(/https?:\/\/[^\s<>"']+/gi) || [];
   for (const rawUrl of urls) {
@@ -694,10 +777,16 @@ async function detectViolationFromOCR(text) {
   return null;
 }
 
-// Ejecuta acciones automod y notifica al canal de log
+// Motor principal del AutoMod. Se llama en cada mensaje de cada servidor.
+// Flujo:
+//   1. Ignorar bots y DMs
+//   2. Verificar si el servidor tiene AutoMod activado
+//   3. Analizar texto del mensaje, imágenes adjuntas, y mensajes forwarded
+//   4. Si hay violación y el usuario tiene inmunidad: solo logear, dejar pasar
+//   5. Si no hay inmunidad: borrar mensaje, mutar al usuario, notificar log y mod channel
 async function checkAutomod(message) {
-  if (message.author.bot) return;
-  if (!message.guild) return;
+  if (message.author.bot) return; // ignorar mensajes de otros bots
+  if (!message.guild) return;     // ignorar DMs (solo aplica en servidores)
 
   const config = automodConfig[message.guild.id];
   if (!config?.enabled) return;
@@ -870,7 +959,9 @@ let violation = await detectViolation(message.content);
 
 // ── Fin AutoMod ────────────────────────────────────────────────────────────────
 
-// Busca el rol Muted | NSFW o lo crea para violaciones de contenido adulto
+// Busca el rol "ABSOLUTE RICKY MUTE ROLE | NSFW" en el servidor o lo crea si no existe.
+// Si encuentra un rol con el nombre viejo ("Muted | NSFW"), lo renombra automáticamente.
+// Al crear el rol, aplica la restricción de SendMessages en todos los canales de texto y voz.
 async function getOrCreateNSFWMutedRole(guild) {
   let role = guild.roles.cache.find((r) => r.name === 'ABSOLUTE RICKY MUTE ROLE | NSFW' || r.name === 'Muted | NSFW');
   if (role && role.name === 'Muted | NSFW') {
@@ -895,7 +986,9 @@ async function getOrCreateNSFWMutedRole(guild) {
   return role;
 }
 
-// Busca el rol Muted o lo crea con permisos en todos los canales
+// Busca el rol "ABSOLUTE RICKY MUTE ROLE" en el servidor o lo crea si no existe.
+// Si existe con el nombre viejo ("Muted"), lo renombra. Busca por MUTED_ROLE_ID del .env primero.
+// Al crear, aplica override de permisos en todos los canales (texto, voz y stage) para bloquear mensajes.
 async function getOrCreateMutedRole(guild) {
   let role = MUTED_ROLE_ID
     ? guild.roles.cache.get(MUTED_ROLE_ID)
@@ -929,6 +1022,8 @@ async function getOrCreateMutedRole(guild) {
 
 let BOT_READY_AT = 0;
 
+// Se ejecuta una sola vez cuando el bot se conecta exitosamente a Discord.
+// Arranca la blocklist, programa su refresco cada 6h, y migra roles viejos.
 client.on('ready', () => {
   BOT_READY_AT = Date.now();
   console.log(`✅ Bot receptor HTTP conectado como ${client.user.tag}`);
@@ -956,10 +1051,14 @@ client.on('ready', () => {
   }
 });
 
+// Set de IDs de mensajes ya procesados — evita procesar el mismo mensaje dos veces
+// si Discord lo envía duplicado por reconexión del gateway.
 const _processedMsgIds = new Set();
-const _processedMsgQueue = [];
-const _recentEventTypes = new Map();
+const _processedMsgQueue = []; // cola para limpiar _processedMsgIds cuando supera 500 entradas
+const _recentEventTypes = new Map(); // tipo de evento → timestamp. Evita broadcast duplicado en 30s
 
+// Se ejecuta cada vez que se envía un mensaje en cualquier canal donde el bot tiene acceso.
+// Hace dos cosas: 1) pasa el mensaje por AutoMod, 2) procesa comandos si empieza con $ricky/$r
 client.on('messageCreate', async (message) => {
   if (_processedMsgIds.has(message.id)) return;
   _processedMsgIds.add(message.id);
@@ -1583,6 +1682,8 @@ client.on('messageCreate', async (message) => {
   }
 });
 
+// ── Rutas HTTP ───────────────────────────────────────────────────────────────────
+// Sirve la página de Términos de Servicio (archivo HTML estático, cacheado en memoria)
 app.get('/tos', (_req, res) => {
   try {
     if (!_htmlCache.tos) _htmlCache.tos = fs.readFileSync('/home/josenriquefelix/bot-receptor-http/public/tos.html', 'utf8');
@@ -1603,6 +1704,7 @@ app.get('/privacy', (_req, res) => {
   }
 });
 
+// Healthcheck: retorna el estado del bot (uptime, canal monitoreado, dispositivos)
 app.get('/health', (_req, res) => {
   res.json({
     ok: true,
@@ -1615,10 +1717,12 @@ app.get('/health', (_req, res) => {
   });
 });
 
+// Retorna el evento más reciente registrado (o null si no hay ninguno)
 app.get('/events/latest', (_req, res) => {
   res.json(events[0] ?? null);
 });
 
+// Lista de eventos con soporte de paginación (?limit=N) y filtro por fecha (?since=ISO)
 app.get('/events', (req, res) => {
   const limit = Number(req.query.limit || 20);
   const since = req.query.since ? new Date(String(req.query.since)) : null;
@@ -1636,6 +1740,8 @@ app.get('/devices', requireAuth, (_req, res) => {
   });
 });
 
+// Registra un dispositivo iOS para notificaciones push.
+// Guarda el token del dispositivo, plataforma y ambiente en devices.json
 app.post('/devices/register', requireAuth, (req, res) => {
   const token = String(req.body?.token || '').trim();
   if (!token) {
@@ -1653,6 +1759,7 @@ app.post('/devices/register', requireAuth, (req, res) => {
   res.status(201).json({ ok: true, device, pushReady: false, note: 'APNs send not wired yet; registration stored.' });
 });
 
+// Envía un mensaje de texto plano al canal principal de Discord (ID_CANAL_DESTINO)
 app.post('/messages/send', requireAuth, async (req, res) => {
   try {
     const text = String(req.body?.text || '').trim();
@@ -1671,6 +1778,7 @@ app.post('/messages/send', requireAuth, async (req, res) => {
   }
 });
 
+// Alerta de Double Coins: notifica al canal principal y a todos los canales suscritos
 app.post('/alerts/doublecoins', requireAuth, async (req, res) => {
   try {
     const contenido = String(req.body?.content || '').trim();
@@ -1689,6 +1797,7 @@ app.post('/alerts/doublecoins', requireAuth, async (req, res) => {
   }
 });
 
+// Alerta de PvP Normal: notifica la apertura del arena AntiMatter
 app.post('/alerts/pvp-normal', requireAuth, async (_req, res) => {
   try {
     const body = 'The AntiMatter PvP Arena has opened! Battle players for plasma coins and kills! ⚔️🔥';
@@ -1705,6 +1814,7 @@ app.post('/alerts/pvp-normal', requireAuth, async (_req, res) => {
   }
 });
 
+// Alerta de Plasma Event: notifica el inicio del evento de plasma coins
 app.post('/alerts/plasma-event', requireAuth, async (_req, res) => {
   try {
     const body = 'Plasma events are being hosted! Come and join to win some shiny plasma coins!';
@@ -1722,12 +1832,14 @@ app.post('/alerts/plasma-event', requireAuth, async (_req, res) => {
   }
 });
 
+// Inicia el servidor HTTP Express en el puerto configurado (3100 por defecto)
 app.listen(port, () => {
   console.log(`🌐 HTTP API listening on port ${port}`);
 });
 
 
-// ── AutoMod button interactions ───────────────────────────────────────────────
+// Se ejecuta cuando alguien hace clic en un botón del panel de AutoMod (Unmute / Ban).
+// Solo procesa botones que empiecen con "automod_unmute_" o "automod_ban_".
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isButton()) return;
   const { customId, guild, member } = interaction;
@@ -1852,16 +1964,19 @@ client.on('guildMemberUpdate', async (oldMember, newMember) => {
     console.error('guildMemberUpdate handler error:', err.message);
   }
 });
+// Cierre limpio del bot cuando el sistema manda señal de terminación (pm2 stop, servidor apagado, etc.)
 process.on('SIGTERM', () => {
   console.log('⚠️ SIGTERM received — closing Discord gateway cleanly');
   client.destroy();
   process.exit(0);
 });
 
+// Cierre limpio del bot cuando se presiona Ctrl+C en la terminal
 process.on('SIGINT', () => {
   console.log('⚠️ SIGINT received — closing Discord gateway cleanly');
   client.destroy();
   process.exit(0);
 });
 
+// Conecta el bot a Discord usando el token. Todo lo anterior es setup — esto lo activa.
 client.login(TOKEN_BOT_RECEPTOR);
