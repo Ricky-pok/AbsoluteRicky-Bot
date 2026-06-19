@@ -198,20 +198,27 @@ function setImmune(userId, guildId) {
 }
 
 // ── Duración de mutes ─────────────────────────────────────────────────────────
-const MAX_MUTE_MS = 30 * 24 * 60 * 60 * 1000; // límite máximo: 30 días en ms
+const MAX_MUTE_MS = 90 * 24 * 60 * 60 * 1000;
 
-// Convierte un string de duración a milisegundos.
-// Soporta: "30s" "5m" "2h" "1d" "1h30m" "2d12h" etc.
-// Retorna null si el formato no es válido o la duración es cero.
 function parseDuration(str) {
-  if (!str) return null;
-  const re = /^(?:(d+)d)?(?:(d+)h)?(?:(d+)m)?(?:(d+)s)?$/i;
-  const m = str.trim().match(re);
-  if (!m || !str.trim()) return null;
-  const [, d, h, min, s] = m.map(Number);
-  // convierte cada parte a ms y suma todo
-  const ms = ((d||0)*86400 + (h||0)*3600 + (min||0)*60 + (s||0)) * 1000;
-  return ms > 0 ? Math.min(ms, MAX_MUTE_MS) : null; // nunca supera 30 días
+  if (!str || typeof str !== 'string') return null;
+  const units = {
+    months: 30*24*3600, month: 30*24*3600, mo: 30*24*3600,
+    weeks: 7*24*3600, week: 7*24*3600, w: 7*24*3600,
+    days: 86400, day: 86400, d: 86400,
+    hours: 3600, hour: 3600, h: 3600,
+    minutes: 60, minute: 60, min: 60, m: 60,
+    seconds: 1, second: 1, s: 1,
+  };
+  const re = /(\d+)\s*(months?|mo|weeks?|w|days?|d|hours?|h|minutes?|min|m|seconds?|s)/gi;
+  let total = 0, matched = false, match;
+  while ((match = re.exec(str.trim())) !== null) {
+    const val = parseInt(match[1]);
+    const unit = match[2].toLowerCase();
+    if (units[unit]) { total += val * units[unit]; matched = true; }
+  }
+  if (!matched || total === 0) return null;
+  return Math.min(total * 1000, MAX_MUTE_MS);
 }
 
 // Convierte milisegundos a string legible: "1h 30m", "2d", "45m", etc.
@@ -340,6 +347,7 @@ async function sendAlert(roleId, content) {
 async function handleAlert({ type, title, body, roleId, decorate }) {
   const content = decorate ? decorate(body) : body;
   await sendAlert(roleId, content);         // canal principal con @rol
+  _recentEventTypes.set(type, Date.now());  // evita que messageCreate re-broadcaste este evento
   await broadcastEvent(type, content);      // otros servidores suscritos (sin @rol)
   return addEvent(type, title, body, { source: 'http-api' });
 }
@@ -1125,6 +1133,7 @@ client.on('messageCreate', async (message) => {
             // Graal
             { name: '┌ 🎮  Graal Online Era', value: '​', inline: false },
             { name: '`$ricky dc`',                                    value: 'Show a countdown to the next **Double Coins** event, or confirm it\'s currently active.',     inline: false },
+            { name: '`$ricky pvp`',                                    value: 'Show a countdown to the next **PvP Arena** event, or confirm it\'s currently active.',     inline: false },
             { name: '`$ricky subscribe <event>`',                     value: 'Subscribe this channel to get pinged when an event starts.\nEvents: `doublecoins` `pvp` `plasma` `all`', inline: false },
             { name: '`$ricky unsubscribe <event>`',                   value: 'Remove a subscription from this channel.',                                                    inline: false },
             { name: '`$ricky subscriptions`',                         value: 'Show which events this channel is currently subscribed to.',                                  inline: false },
@@ -1640,6 +1649,31 @@ client.on('messageCreate', async (message) => {
         return;
       }
 
+      // PvP Timer: pvptimer / pvptime / pvp
+      if (command === 'pvptimer' || command === 'pvptime' || command === 'pvp') {
+        const PVP_INTERVAL_MS = 18000000;
+        const PVP_DURATION_MS = 30 * 60 * 1000;
+        const pvpEvents = events.filter(e => e.type === 'pvp_normal');
+        if (!pvpEvents.length) {
+          await message.reply('No PvP events recorded yet.');
+          return;
+        }
+        const lastMs = new Date(pvpEvents[0].createdAt).getTime();
+        const now = Date.now();
+        const fmt = (ms) => { const s = Math.floor(ms/1000), h = Math.floor(s/3600), m = Math.floor((s%3600)/60), sec = s%60; return h > 0 ? h+'h '+String(m).padStart(2,'0')+'m '+String(sec).padStart(2,'0')+'s' : String(m).padStart(2,'0')+'m '+String(sec).padStart(2,'0')+'s'; };
+        const toTs = (ms) => '<t:'+Math.floor(ms/1000)+':R>';
+        const pvpEndMs = lastMs + PVP_DURATION_MS;
+        const isActive = now >= lastMs && now < pvpEndMs;
+        let embed;
+        if (isActive) {
+          embed = { color: 0xff4444, title: '⚔️ AntiMatter PvP Arena — 🟢 LIVE', description: 'The arena is open! Join now! Closes '+toTs(pvpEndMs)+' ('+fmt(pvpEndMs-now)+' left)', timestamp: new Date().toISOString() };
+        } else {
+          let nextMs = lastMs; while (nextMs <= now) nextMs += PVP_INTERVAL_MS;
+          embed = { color: 0xff4444, title: '⚔️ AntiMatter PvP Arena — Next Round', description: 'Arena opens in **'+fmt(nextMs-now)+'** — '+toTs(nextMs), timestamp: new Date().toISOString() };
+        }
+        await message.reply({ embeds: [embed] });
+        return;
+      }
       // Subscriptions: $ricky subscriptions
       if (command === 'subscriptions') {
         const entry = subscribedChannels.find((c) => c.channelId === message.channel.id);
