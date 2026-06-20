@@ -69,13 +69,11 @@ if (!TOKEN_BOT_RECEPTOR || !ID_CANAL_DESTINO) {
 // ── Rutas a archivos JSON de persistencia ────────────────────────────────────
 // Todos los datos se guardan en archivos JSON en la misma carpeta del bot
 const EVENTS_FILE  = path.join(__dirname, 'events.json');   // historial de eventos de Graal
-const DEVICES_FILE = path.join(__dirname, 'devices.json');  // dispositivos iOS registrados para push
 const CHANNELS_FILE= path.join(__dirname, 'channels.json'); // canales suscritos a eventos
 const LOGS_FILE    = path.join(__dirname, 'logs.json');     // logs de comandos y moderación
 const AUTOMOD_FILE = path.join(__dirname, 'automod.json');  // configuración de AutoMod por servidor
 const MAX_EVENTS   = 100;   // máximo de eventos guardados en memoria/disco
 const _htmlCache   = {};    // caché en memoria de las páginas HTML estáticas (tos, privacy)
-const MAX_DEVICES  = 200;   // máximo de dispositivos registrados
 
 // ── Inicialización SQLite ─────────────────────────────────────────────────────
 // SQLite reemplazará progresivamente los archivos JSON. En esta fase solo creamos
@@ -100,15 +98,6 @@ db.exec(`
     source             TEXT NOT NULL DEFAULT 'http-api',
     created_at         TEXT NOT NULL,
     discord_message_id TEXT
-  );
-
-  CREATE TABLE IF NOT EXISTS devices (
-    token         TEXT PRIMARY KEY,
-    platform      TEXT NOT NULL DEFAULT 'unknown',
-    app_bundle_id TEXT NOT NULL DEFAULT 'unknown',
-    environment   TEXT NOT NULL DEFAULT 'unknown',
-    registered_at TEXT NOT NULL,
-    updated_at    TEXT NOT NULL
   );
 
   CREATE TABLE IF NOT EXISTS subscribed_channels (
@@ -172,20 +161,6 @@ const _stmtUpsertEvent = db.prepare(`
 const _stmtTrimEvents = db.prepare(`
   DELETE FROM events WHERE id NOT IN (
     SELECT id FROM events ORDER BY created_at DESC LIMIT ?
-  )
-`);
-const _stmtUpsertDevice = db.prepare(`
-  INSERT INTO devices (token, platform, app_bundle_id, environment, registered_at, updated_at)
-  VALUES (@token, @platform, @appBundleId, @environment, @registeredAt, @updatedAt)
-  ON CONFLICT(token) DO UPDATE SET
-    platform      = excluded.platform,
-    app_bundle_id = excluded.app_bundle_id,
-    environment   = excluded.environment,
-    updated_at    = excluded.updated_at
-`);
-const _stmtTrimDevices = db.prepare(`
-  DELETE FROM devices WHERE token NOT IN (
-    SELECT token FROM devices ORDER BY updated_at DESC LIMIT ?
   )
 `);
 const _stmtUpsertChannel = db.prepare(`
@@ -315,16 +290,6 @@ let events = db.prepare(`
   FROM events ORDER BY created_at DESC LIMIT ?
 `).all(MAX_EVENTS);
 
-// devices: ordenados por updatedAt newest-first
-let registeredDevices = db.prepare(`
-  SELECT token, platform,
-         app_bundle_id AS appBundleId,
-         environment,
-         registered_at AS registeredAt,
-         updated_at AS updatedAt
-  FROM devices ORDER BY updated_at DESC LIMIT ?
-`).all(MAX_DEVICES);
-
 // subscribedChannels: reconstruye el shape original con events: [] desde la tabla normalizada
 const _rawChannels = db.prepare(`
   SELECT channel_id AS channelId, guild_id AS guildId,
@@ -408,7 +373,6 @@ function runJsonMigration() {
 
   // Lee los JSON directamente (safety net si bot.db fue eliminado)
   const jsonEvents   = loadJsonArray(EVENTS_FILE);
-  const jsonDevices  = loadJsonArray(DEVICES_FILE);
   const jsonChannels = loadJsonArray(CHANNELS_FILE);
   const jsonLogs     = loadJsonArray(LOGS_FILE);
   let jsonAutomod = {};
@@ -420,7 +384,6 @@ function runJsonMigration() {
 
   const hasJsonData =
     jsonEvents.length > 0 ||
-    jsonDevices.length > 0 ||
     jsonChannels.length > 0 ||
     jsonLogs.length > 0 ||
     Object.keys(jsonAutomod).length > 0;
@@ -444,22 +407,6 @@ function runJsonMigration() {
       }
     })(jsonEvents);
     console.log(`  ✅ events: ${jsonEvents.length} migrados`);
-  }
-
-  if (jsonDevices.length > 0) {
-    db.transaction((rows) => {
-      for (const d of rows) {
-        _stmtUpsertDevice.run({
-          token: d.token,
-          platform: d.platform || 'unknown',
-          appBundleId: d.appBundleId || 'unknown',
-          environment: d.environment || 'unknown',
-          registeredAt: d.registeredAt,
-          updatedAt: d.updatedAt,
-        });
-      }
-    })(jsonDevices);
-    console.log(`  ✅ devices: ${jsonDevices.length} migrados`);
   }
 
   if (jsonChannels.length > 0) {
@@ -648,32 +595,6 @@ function addEvent(type, title, body, extra = {}) {
   _stmtTrimEvents.run(MAX_EVENTS);
 
   return event;
-}
-
-// Registra o actualiza un dispositivo iOS para notificaciones push.
-// Si el token ya existía, conserva su registeredAt original y actualiza updatedAt.
-function registerDevice({ token, platform, appBundleId, environment }) {
-  const now = new Date().toISOString();
-  const existing = registeredDevices.find((d) => d.token === token);
-  const device = {
-    token,
-    platform:     platform     || 'unknown',
-    appBundleId:  appBundleId  || 'unknown',
-    environment:  environment  || 'unknown',
-    registeredAt: existing?.registeredAt || now,
-    updatedAt:    now,
-  };
-
-  registeredDevices = [
-    device,
-    ...registeredDevices.filter((d) => d.token !== token),
-  ].slice(0, MAX_DEVICES);
-
-  // Persiste a SQLite (upsert por token)
-  _stmtUpsertDevice.run(device);
-  _stmtTrimDevices.run(MAX_DEVICES);
-
-  return registeredDevices[0];
 }
 
 // Middleware de autenticación para los endpoints HTTP.
@@ -2164,7 +2085,7 @@ app.get('/privacy', (_req, res) => {
   }
 });
 
-// Healthcheck: retorna el estado del bot (uptime, canal monitoreado, dispositivos)
+// Healthcheck: retorna el estado del bot (uptime, canal monitoreado)
 app.get('/health', (_req, res) => {
   res.json({
     ok: true,
@@ -2172,8 +2093,6 @@ app.get('/health', (_req, res) => {
     monitoredChannelId: MONITORED_CHANNEL_ID,
     importBotMessages: IMPORT_BOT_MESSAGES,
     oldBotUserIdConfigured: Boolean(OLD_BOT_USER_ID),
-    registeredDeviceCount: registeredDevices.length,
-    pushArchitecture: 'registration-only',
   });
 });
 
@@ -2191,32 +2110,6 @@ app.get('/events', (req, res) => {
     result = result.filter((event) => new Date(event.createdAt) > since);
   }
   res.json(result.slice(0, limit));
-});
-
-app.get('/devices', requireAuth, (_req, res) => {
-  res.json({
-    count: registeredDevices.length,
-    devices: registeredDevices,
-  });
-});
-
-// Registra un dispositivo iOS para notificaciones push.
-// Guarda el token del dispositivo, plataforma y ambiente en devices.json
-app.post('/devices/register', requireAuth, (req, res) => {
-  const token = String(req.body?.token || '').trim();
-  if (!token) {
-    return res.status(400).json({ error: 'Device token is required' });
-  }
-
-  const device = registerDevice({
-    token,
-    platform: String(req.body?.platform || 'ios'),
-    appBundleId: String(req.body?.appBundleId || 'unknown'),
-    environment: String(req.body?.environment || 'unknown'),
-  });
-
-  console.log(`📱 Registered device ${device.platform} ${device.environment} ${device.appBundleId}`);
-  res.status(201).json({ ok: true, device, pushReady: false, note: 'APNs send not wired yet; registration stored.' });
 });
 
 // Envía un mensaje de texto plano al canal principal de Discord (ID_CANAL_DESTINO)
