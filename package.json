@@ -1,7 +1,7 @@
 {
   "name": "bot-receptor",
-  "version": "1.1.0",
-  "main": "index_bot_receptor.js",
+  "version": "1.4.0",
+  "main": "index_bot_receptor_http.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
@@ -11,6 +11,7 @@
   "description": "",
   "dependencies": {
     "@google-cloud/vision": "^5.3.6",
+    "better-sqlite3": "^12.11.1",
     "discord.js": "^14.25.1",
     "dotenv": "^17.3.1",
     "express": "^5.2.1"

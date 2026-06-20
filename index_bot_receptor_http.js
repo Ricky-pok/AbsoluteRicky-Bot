@@ -77,6 +77,176 @@ const MAX_EVENTS   = 100;   // máximo de eventos guardados en memoria/disco
 const _htmlCache   = {};    // caché en memoria de las páginas HTML estáticas (tos, privacy)
 const MAX_DEVICES  = 200;   // máximo de dispositivos registrados
 
+// ── Inicialización SQLite ─────────────────────────────────────────────────────
+// SQLite reemplazará progresivamente los archivos JSON. En esta fase solo creamos
+// las tablas vacías. La lógica del bot sigue leyendo y escribiendo a los JSON
+// como antes — esta fase es puramente aditiva, no rompe nada.
+const Database = require('better-sqlite3');
+const DB_FILE  = path.join(__dirname, 'bot.db');
+const db       = new Database(DB_FILE);
+
+// WAL mode: escrituras más rápidas y lecturas no bloquean escrituras
+db.pragma('journal_mode = WAL');
+// Habilita foreign keys (necesario para el CASCADE en channel_event_subscriptions)
+db.pragma('foreign_keys = ON');
+
+// Crea las tablas si no existen — idempotente, seguro correr en cada arranque
+db.exec(`
+  CREATE TABLE IF NOT EXISTS events (
+    id                 TEXT PRIMARY KEY,
+    type               TEXT NOT NULL,
+    title              TEXT NOT NULL,
+    body               TEXT NOT NULL,
+    source             TEXT NOT NULL DEFAULT 'http-api',
+    created_at         TEXT NOT NULL,
+    discord_message_id TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS devices (
+    token         TEXT PRIMARY KEY,
+    platform      TEXT NOT NULL DEFAULT 'unknown',
+    app_bundle_id TEXT NOT NULL DEFAULT 'unknown',
+    environment   TEXT NOT NULL DEFAULT 'unknown',
+    registered_at TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS subscribed_channels (
+    channel_id   TEXT PRIMARY KEY,
+    guild_id     TEXT NOT NULL,
+    guild_name   TEXT NOT NULL,
+    channel_name TEXT NOT NULL,
+    added_at     TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS channel_event_subscriptions (
+    channel_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    PRIMARY KEY (channel_id, event_type),
+    FOREIGN KEY (channel_id) REFERENCES subscribed_channels(channel_id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS logs (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    type      TEXT NOT NULL,
+    at        TEXT NOT NULL,
+    action    TEXT,
+    target    TEXT,
+    target_id TEXT,
+    guild     TEXT,
+    guild_id  TEXT,
+    extra     TEXT NOT NULL DEFAULT '{}'
+  );
+
+  CREATE TABLE IF NOT EXISTS automod_config (
+    guild_id             TEXT PRIMARY KEY,
+    enabled              INTEGER NOT NULL DEFAULT 0,
+    log_channel_id       TEXT,
+    mod_alert_channel_id TEXT,
+    mute_duration        INTEGER
+  );
+
+  CREATE TABLE IF NOT EXISTS active_mutes (
+    key        TEXT PRIMARY KEY,
+    user_id    TEXT NOT NULL,
+    guild_id   TEXT NOT NULL,
+    reason     TEXT NOT NULL,
+    muted_by   TEXT NOT NULL,
+    muted_at   INTEGER NOT NULL,
+    expires_at INTEGER
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_events_type        ON events(type);
+  CREATE INDEX IF NOT EXISTS idx_events_created_at  ON events(created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_logs_type          ON logs(type);
+  CREATE INDEX IF NOT EXISTS idx_active_mutes_guild ON active_mutes(guild_id);
+`);
+
+console.log(`✅ SQLite ready: ${DB_FILE}`);
+
+// ── Prepared statements (cacheados, mucho más rápidos que parsear SQL cada vez) ─
+const _stmtUpsertEvent = db.prepare(`
+  INSERT OR REPLACE INTO events (id, type, title, body, source, created_at, discord_message_id)
+  VALUES (@id, @type, @title, @body, @source, @createdAt, @discordMessageId)
+`);
+const _stmtTrimEvents = db.prepare(`
+  DELETE FROM events WHERE id NOT IN (
+    SELECT id FROM events ORDER BY created_at DESC LIMIT ?
+  )
+`);
+const _stmtUpsertDevice = db.prepare(`
+  INSERT INTO devices (token, platform, app_bundle_id, environment, registered_at, updated_at)
+  VALUES (@token, @platform, @appBundleId, @environment, @registeredAt, @updatedAt)
+  ON CONFLICT(token) DO UPDATE SET
+    platform      = excluded.platform,
+    app_bundle_id = excluded.app_bundle_id,
+    environment   = excluded.environment,
+    updated_at    = excluded.updated_at
+`);
+const _stmtTrimDevices = db.prepare(`
+  DELETE FROM devices WHERE token NOT IN (
+    SELECT token FROM devices ORDER BY updated_at DESC LIMIT ?
+  )
+`);
+const _stmtUpsertChannel = db.prepare(`
+  INSERT OR IGNORE INTO subscribed_channels (channel_id, guild_id, guild_name, channel_name, added_at)
+  VALUES (@channelId, @guildId, @guildName, @channelName, @addedAt)
+`);
+const _stmtAddSub = db.prepare(`
+  INSERT OR IGNORE INTO channel_event_subscriptions (channel_id, event_type) VALUES (?, ?)
+`);
+const _stmtRemoveSub = db.prepare(`
+  DELETE FROM channel_event_subscriptions WHERE channel_id = ? AND event_type = ?
+`);
+const _stmtDeleteChannel = db.prepare(`DELETE FROM subscribed_channels WHERE channel_id = ?`);
+const _stmtInsertLog = db.prepare(`
+  INSERT INTO logs (type, at, action, target, target_id, guild, guild_id, extra)
+  VALUES (@type, @at, @action, @target, @targetId, @guild, @guildId, @extra)
+`);
+const _stmtTrimLogs = db.prepare(`
+  DELETE FROM logs WHERE id NOT IN (
+    SELECT id FROM logs ORDER BY at DESC LIMIT ?
+  )
+`);
+const _stmtUpsertAutomod = db.prepare(`
+  INSERT INTO automod_config (guild_id, enabled, log_channel_id, mod_alert_channel_id, mute_duration)
+  VALUES (@guildId, @enabled, @logChannelId, @modAlertChannelId, @muteDuration)
+  ON CONFLICT(guild_id) DO UPDATE SET
+    enabled              = excluded.enabled,
+    log_channel_id       = excluded.log_channel_id,
+    mod_alert_channel_id = excluded.mod_alert_channel_id,
+    mute_duration        = excluded.mute_duration
+`);
+const _stmtUpsertMute = db.prepare(`
+  INSERT OR REPLACE INTO active_mutes (key, user_id, guild_id, reason, muted_by, muted_at, expires_at)
+  VALUES (@key, @userId, @guildId, @reason, @mutedBy, @mutedAt, @expiresAt)
+`);
+const _stmtDeleteMute = db.prepare(`DELETE FROM active_mutes WHERE key = ?`);
+
+// Persiste la configuración de AutoMod de un servidor en la DB
+function persistAutomodConfig(guildId) {
+  const cfg = automodConfig[guildId] || {};
+  _stmtUpsertAutomod.run({
+    guildId,
+    enabled:           cfg.enabled ? 1 : 0,
+    logChannelId:      cfg.logChannelId      || null,
+    modAlertChannelId: cfg.modAlertChannelId || null,
+    muteDuration:      cfg.muteDuration      || null,
+  });
+}
+
+// Persiste un registro de mute activo en la DB
+function persistActiveMute(key, info) {
+  const [userId, guildId] = key.split('_');
+  _stmtUpsertMute.run({
+    key, userId, guildId,
+    reason:    info.reason,
+    mutedBy:   info.mutedBy,
+    mutedAt:   info.mutedAt,
+    expiresAt: info.expiresAt || null,
+  });
+}
+
 // ── Rate Limiting ─────────────────────────────────────────────────────────────
 // Evita que un usuario spam-use comandos. Máximo 10 comandos por minuto.
 // Si lo supera, queda bloqueado 60 segundos adicionales.
@@ -124,55 +294,231 @@ function isRateLimited(userId) {
 // ── Fin Rate Limiting ─────────────────────────────────────────────────────────
 
 
-// ── Sistema de escritura a disco (debounced) ──────────────────────────────────
-// Agrupa múltiples cambios rápidos en una sola escritura para no saturar el disco.
-// Si se llama varias veces seguidas, reinicia el timer — solo escribe 800ms después
-// del último cambio. Así evitamos escribir el archivo 50 veces por segundo.
-const _saveTimers = {};
-function debouncedWrite(key, file, getData, delay = 800) {
-  clearTimeout(_saveTimers[key]);                              // cancela escritura pendiente anterior
-  _saveTimers[key] = setTimeout(() => {
-    fs.writeFile(file, JSON.stringify(getData(), null, 2), (err) => { // escribe el JSON con formato bonito
-      if (err) console.error(`❌ Failed to save ${key}:`, err.message);
-    });
-  }, delay);
-}
-
-// Carga un archivo JSON del disco. Si no existe o está corrupto, retorna []
+// Carga un archivo JSON del disco. Mantenido como safety net para la migración
+// si alguien borra bot.db — permite re-importar desde los JSON originales.
 function loadJsonArray(file) {
   try {
     const raw = fs.readFileSync(file, 'utf8');
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : []; // asegura que siempre sea array
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
-    return []; // si falla, empieza vacío
+    return [];
   }
 }
 
-// ── Datos en memoria cargados desde disco al iniciar ─────────────────────────
-let events           = loadJsonArray(EVENTS_FILE);   // historial de eventos de Graal
-let registeredDevices= loadJsonArray(DEVICES_FILE);  // dispositivos push registrados
-let subscribedChannels = loadJsonArray(CHANNELS_FILE); // canales suscritos a notificaciones
+// ── Datos en memoria cargados desde SQLite al iniciar ────────────────────────
+// events: ordenados newest-first, limitados a MAX_EVENTS
+let events = db.prepare(`
+  SELECT id, type, title, body, source,
+         created_at AS createdAt,
+         discord_message_id AS discordMessageId
+  FROM events ORDER BY created_at DESC LIMIT ?
+`).all(MAX_EVENTS);
 
-let botLogs = loadJsonArray(LOGS_FILE); // logs de moderación y comandos
-const MAX_LOGS = 200;                   // máximo de entradas que guardamos
+// devices: ordenados por updatedAt newest-first
+let registeredDevices = db.prepare(`
+  SELECT token, platform,
+         app_bundle_id AS appBundleId,
+         environment,
+         registered_at AS registeredAt,
+         updated_at AS updatedAt
+  FROM devices ORDER BY updated_at DESC LIMIT ?
+`).all(MAX_DEVICES);
 
-function saveLogs() {
-  debouncedWrite('logs', LOGS_FILE, () => botLogs);
+// subscribedChannels: reconstruye el shape original con events: [] desde la tabla normalizada
+const _rawChannels = db.prepare(`
+  SELECT channel_id AS channelId, guild_id AS guildId,
+         guild_name AS guildName, channel_name AS channelName,
+         added_at AS addedAt
+  FROM subscribed_channels
+`).all();
+const _channelSubs = db.prepare(`
+  SELECT channel_id AS channelId, event_type AS eventType
+  FROM channel_event_subscriptions
+`).all();
+const _subsByChannel = {};
+for (const s of _channelSubs) {
+  if (!_subsByChannel[s.channelId]) _subsByChannel[s.channelId] = [];
+  _subsByChannel[s.channelId].push(s.eventType);
 }
+let subscribedChannels = _rawChannels.map(c => ({
+  ...c,
+  events: _subsByChannel[c.channelId] || [],
+}));
 
-// Agrega una entrada al log. type puede ser 'mod' (moderación) o 'command' (comandos)
-// data es un objeto con los detalles (quién, qué, cuándo, en qué servidor)
+// botLogs: campos fijos + spread de la columna extra JSON para los campos variables
+const MAX_LOGS = 200; // máximo de entradas que guardamos
+let botLogs = db.prepare(`
+  SELECT type, at, action, target,
+         target_id AS targetId,
+         guild, guild_id AS guildId, extra
+  FROM logs ORDER BY at DESC LIMIT ?
+`).all(MAX_LOGS).map(row => {
+  let extra = {};
+  try { extra = JSON.parse(row.extra || '{}'); } catch { extra = {}; }
+  const { extra: _drop, ...base } = row;
+  return { ...base, ...extra };
+});
+
+// Agrega una entrada al log y la persiste en SQLite.
+// type: 'mod' (moderación) o 'command' (comandos)
+// data: objeto con detalles (campos fijos se mapean a columnas, resto va a extra JSON)
 function addLog(type, data) {
-  botLogs = [{ type, ...data, at: new Date().toISOString() }, ...botLogs].slice(0, MAX_LOGS);
-  saveLogs();
+  const entry = { type, ...data, at: new Date().toISOString() };
+  botLogs = [entry, ...botLogs].slice(0, MAX_LOGS);
+
+  const { type: _t, at, action, target, targetId, guild, guildId, ...rest } = entry;
+  _stmtInsertLog.run({
+    type: type || 'unknown',
+    at,
+    action:   action   || null,
+    target:   target   || null,
+    targetId: targetId || null,
+    guild:    guild    || null,
+    guildId:  guildId  || null,
+    extra: JSON.stringify(rest),
+  });
+  _stmtTrimLogs.run(MAX_LOGS);
 }
 
-// Carga la configuración de AutoMod desde disco al arrancar.
-// Es un objeto donde cada clave es un guildId: { enabled, logChannelId, modAlertChannelId, muteDuration }
-let automodConfig = (() => {
-  try { const r = fs.readFileSync(AUTOMOD_FILE, 'utf8'); const p = JSON.parse(r); return (p && typeof p === 'object' && !Array.isArray(p)) ? p : {}; } catch { return {}; }
-})();
+// automodConfig: objeto { [guildId]: { enabled, logChannelId, modAlertChannelId, muteDuration } }
+let automodConfig = {};
+for (const row of db.prepare('SELECT * FROM automod_config').all()) {
+  automodConfig[row.guild_id] = {
+    enabled:           Boolean(row.enabled),
+    logChannelId:      row.log_channel_id      || null,
+    modAlertChannelId: row.mod_alert_channel_id || null,
+    muteDuration:      row.mute_duration       || null,
+  };
+}
+
+// ── Migración one-shot JSON → SQLite ──────────────────────────────────────────
+// Lee los JSON directamente del disco y los importa a SQLite.
+// Solo corre si las tablas están vacías — idempotente, safety net si se borra bot.db.
+// Usa transacciones (10-100x más rápido que inserts individuales).
+function runJsonMigration() {
+  const tablesEmpty =
+    db.prepare('SELECT COUNT(*) AS c FROM events').get().c === 0 &&
+    db.prepare('SELECT COUNT(*) AS c FROM devices').get().c === 0 &&
+    db.prepare('SELECT COUNT(*) AS c FROM logs').get().c === 0 &&
+    db.prepare('SELECT COUNT(*) AS c FROM automod_config').get().c === 0 &&
+    db.prepare('SELECT COUNT(*) AS c FROM subscribed_channels').get().c === 0;
+
+  if (!tablesEmpty) return; // tablas ya con datos — nada que hacer
+
+  // Lee los JSON directamente (safety net si bot.db fue eliminado)
+  const jsonEvents   = loadJsonArray(EVENTS_FILE);
+  const jsonDevices  = loadJsonArray(DEVICES_FILE);
+  const jsonChannels = loadJsonArray(CHANNELS_FILE);
+  const jsonLogs     = loadJsonArray(LOGS_FILE);
+  let jsonAutomod = {};
+  try {
+    const r = fs.readFileSync(AUTOMOD_FILE, 'utf8');
+    const p = JSON.parse(r);
+    if (p && typeof p === 'object' && !Array.isArray(p)) jsonAutomod = p;
+  } catch { /* archivo no existe — ok */ }
+
+  const hasJsonData =
+    jsonEvents.length > 0 ||
+    jsonDevices.length > 0 ||
+    jsonChannels.length > 0 ||
+    jsonLogs.length > 0 ||
+    Object.keys(jsonAutomod).length > 0;
+
+  if (!hasJsonData) return; // ni JSON ni DB tienen datos — primer arranque limpio
+
+  console.log('🔄 Iniciando migración one-shot JSON → SQLite...');
+
+  if (jsonEvents.length > 0) {
+    db.transaction((rows) => {
+      for (const e of rows) {
+        _stmtUpsertEvent.run({
+          id: e.id,
+          type: e.type,
+          title: e.title,
+          body: e.body,
+          source: e.source || 'http-api',
+          createdAt: e.createdAt,
+          discordMessageId: e.discordMessageId || null,
+        });
+      }
+    })(jsonEvents);
+    console.log(`  ✅ events: ${jsonEvents.length} migrados`);
+  }
+
+  if (jsonDevices.length > 0) {
+    db.transaction((rows) => {
+      for (const d of rows) {
+        _stmtUpsertDevice.run({
+          token: d.token,
+          platform: d.platform || 'unknown',
+          appBundleId: d.appBundleId || 'unknown',
+          environment: d.environment || 'unknown',
+          registeredAt: d.registeredAt,
+          updatedAt: d.updatedAt,
+        });
+      }
+    })(jsonDevices);
+    console.log(`  ✅ devices: ${jsonDevices.length} migrados`);
+  }
+
+  if (jsonChannels.length > 0) {
+    db.transaction((rows) => {
+      for (const c of rows) {
+        _stmtUpsertChannel.run({
+          channelId: c.channelId,
+          guildId: c.guildId,
+          guildName: c.guildName,
+          channelName: c.channelName,
+          addedAt: c.addedAt,
+        });
+        for (const evType of (c.events || [])) {
+          _stmtAddSub.run(c.channelId, evType);
+        }
+      }
+    })(jsonChannels);
+    console.log(`  ✅ subscribed_channels: ${jsonChannels.length} migrados`);
+  }
+
+  if (jsonLogs.length > 0) {
+    db.transaction((rows) => {
+      for (const l of rows) {
+        const { type, at, action, target, targetId, guild, guildId, ...rest } = l;
+        _stmtInsertLog.run({
+          type: type || 'unknown',
+          at: at || new Date().toISOString(),
+          action: action || null,
+          target: target || null,
+          targetId: targetId || null,
+          guild: guild || null,
+          guildId: guildId || null,
+          extra: JSON.stringify(rest),
+        });
+      }
+    })(jsonLogs);
+    console.log(`  ✅ logs: ${jsonLogs.length} migrados`);
+  }
+
+  const automodEntries = Object.entries(jsonAutomod);
+  if (automodEntries.length > 0) {
+    db.transaction((entries) => {
+      for (const [guildId, cfg] of entries) {
+        _stmtUpsertAutomod.run({
+          guildId,
+          enabled: cfg.enabled ? 1 : 0,
+          logChannelId: cfg.logChannelId || null,
+          modAlertChannelId: cfg.modAlertChannelId || null,
+          muteDuration: cfg.muteDuration || null,
+        });
+      }
+    })(automodEntries);
+    console.log(`  ✅ automod_config: ${automodEntries.length} migrados`);
+  }
+
+  console.log('✅ Migración JSON → SQLite completada.');
+}
+
+runJsonMigration();
 
 // ── Sistema de inmunidad post-unmute ─────────────────────────────────────────
 // Cuando un mod desmutea a alguien manualmente desde el panel de botones,
@@ -237,8 +583,17 @@ function formatDuration(ms) {
 const muteTimers = new Map();
 
 // userId_guildId → { reason, mutedBy, mutedAt, expiresAt|null }
-// Registro en memoria de todos los mutes activos. Lo usa $ricky mutes para mostrar la lista.
+// Registro de todos los mutes activos. Lo usa $ricky mutes para mostrar la lista.
+// Se carga desde SQLite al arrancar — los mutes ya no se pierden en restarts.
 const activeMutes = new Map();
+for (const row of db.prepare('SELECT * FROM active_mutes').all()) {
+  activeMutes.set(row.key, {
+    reason:    row.reason,
+    mutedBy:   row.muted_by,
+    mutedAt:   row.muted_at,
+    expiresAt: row.expires_at,
+  });
+}
 
 // Programa la remoción automática del rol muted después de durationMs milisegundos.
 // Si ya había un timer para ese usuario, lo cancela primero para evitar doble unmute.
@@ -247,7 +602,8 @@ function scheduleMuteExpiry(member, role, durationMs) {
   if (muteTimers.has(key)) clearTimeout(muteTimers.get(key)); // cancela timer anterior
   const timer = setTimeout(async () => {
     muteTimers.delete(key);  // borra el timer del mapa
-    activeMutes.delete(key); // borra el registro del mute activo
+    activeMutes.delete(key); // borra el registro del mute activo en memoria
+    _stmtDeleteMute.run(key); // y también en DB
     try {
       await member.guild.members.fetch(member.id); // refresca el miembro desde Discord
       const freshMember = member.guild.members.cache.get(member.id);
@@ -261,12 +617,6 @@ function scheduleMuteExpiry(member, role, durationMs) {
   }, durationMs);
   muteTimers.set(key, timer); // guarda el timer para poder cancelarlo si se desmutea antes
 }
-
-// Funciones de guardado — cada una llama a debouncedWrite con su archivo correspondiente
-function saveAutomod()   { debouncedWrite('automod',   AUTOMOD_FILE,   () => automodConfig); }
-function saveChannels()  { debouncedWrite('channels',  CHANNELS_FILE,  () => subscribedChannels); }
-function saveEvents()    { debouncedWrite('events',    EVENTS_FILE,    () => events); }
-function saveDevices()   { debouncedWrite('devices',   DEVICES_FILE,   () => registeredDevices); }
 
 // Set con los IDs de mensajes de Discord ya procesados como eventos.
 // Evita importar el mismo evento dos veces si el bot se reinicia.
@@ -290,32 +640,39 @@ function addEvent(type, title, body, extra = {}) {
   // Registra el ID para no volver a importarlo
   if (event.discordMessageId) seenDiscordMessageIds.add(event.discordMessageId);
 
-  // Pone el nuevo evento al principio y descarta los más viejos si supera MAX_EVENTS
+  // Pone el nuevo evento al principio en memoria y descarta los más viejos
   events = [event, ...events.filter((existing) => existing.id !== event.id)].slice(0, MAX_EVENTS);
-  saveEvents();
+
+  // Persiste a SQLite (síncrono — sin debounce, sin race conditions)
+  _stmtUpsertEvent.run(event);
+  _stmtTrimEvents.run(MAX_EVENTS);
+
   return event;
 }
 
 // Registra o actualiza un dispositivo iOS para notificaciones push.
-// Si el token ya existía, lo actualiza (updatedAt); si no, lo agrega al inicio.
+// Si el token ya existía, conserva su registeredAt original y actualiza updatedAt.
 function registerDevice({ token, platform, appBundleId, environment }) {
   const now = new Date().toISOString();
+  const existing = registeredDevices.find((d) => d.token === token);
   const device = {
     token,
     platform:     platform     || 'unknown',
     appBundleId:  appBundleId  || 'unknown',
     environment:  environment  || 'unknown',
-    registeredAt: now,
+    registeredAt: existing?.registeredAt || now,
     updatedAt:    now,
   };
 
-  // Merge con el registro existente si ya había uno con ese token
   registeredDevices = [
-    { ...device, ...(registeredDevices.find((existing) => existing.token === token) || {}), updatedAt: now },
-    ...registeredDevices.filter((existing) => existing.token !== token),
+    device,
+    ...registeredDevices.filter((d) => d.token !== token),
   ].slice(0, MAX_DEVICES);
 
-  saveDevices();
+  // Persiste a SQLite (upsert por token)
+  _stmtUpsertDevice.run(device);
+  _stmtTrimDevices.run(MAX_DEVICES);
+
   return registeredDevices[0];
 }
 
@@ -881,13 +1238,16 @@ let violation = await detectViolation(message.content);
       // Programa unmute automático si el servidor tiene muteDuration configurado
       const autoMuteDuration = config.muteDuration;
       if (autoMuteDuration) scheduleMuteExpiry(message.member, mutedRole, autoMuteDuration);
-      // Registrar mute activo
-      activeMutes.set(message.author.id + '_' + message.guild.id, {
+      // Registrar mute activo (memoria + DB)
+      const _muteKey = message.author.id + '_' + message.guild.id;
+      const _muteInfo = {
         reason: violation.label,
         mutedBy: 'AutoMod',
         mutedAt: Date.now(),
         expiresAt: autoMuteDuration ? Date.now() + autoMuteDuration : null,
-      });
+      };
+      activeMutes.set(_muteKey, _muteInfo);
+      persistActiveMute(_muteKey, _muteInfo);
     }
   } catch (err) {
     console.error('❌ AutoMod mute failed:', err.message);
@@ -1030,6 +1390,57 @@ async function getOrCreateMutedRole(guild) {
 
 let BOT_READY_AT = 0;
 
+// Reconstruye los setTimeout de mutes activos después de un restart.
+// Los timers son objetos en memoria — se pierden al reiniciar, pero la DB persiste.
+// Esta función lee active_mutes y vuelve a programar la expiración con el tiempo restante.
+async function _rebuildMuteTimers() {
+  const now = Date.now();
+  let rebuilt = 0, expired = 0, cleaned = 0;
+
+  for (const [key, info] of activeMutes) {
+    if (!info.expiresAt) continue; // mute permanente — no hay timer que reconstruir
+
+    const remaining = info.expiresAt - now;
+    if (remaining <= 0) {
+      // Expiró mientras el bot estaba apagado — limpia memoria y DB
+      activeMutes.delete(key);
+      _stmtDeleteMute.run(key);
+      expired++;
+      continue;
+    }
+
+    const [userId, guildId] = key.split('_');
+    try {
+      const guild = client.guilds.cache.get(guildId);
+      if (!guild) { cleaned++; continue; }
+      const member = await guild.members.fetch(userId).catch(() => null);
+      if (!member) {
+        // Usuario ya no está en el servidor — limpia registro
+        activeMutes.delete(key);
+        _stmtDeleteMute.run(key);
+        cleaned++;
+        continue;
+      }
+      const mutedRole = await getOrCreateMutedRole(guild);
+      if (!member.roles.cache.has(mutedRole.id)) {
+        // El rol ya fue quitado manualmente — limpia registro
+        activeMutes.delete(key);
+        _stmtDeleteMute.run(key);
+        cleaned++;
+        continue;
+      }
+      scheduleMuteExpiry(member, mutedRole, remaining);
+      rebuilt++;
+    } catch (err) {
+      console.error(`❌ Rebuild timer failed for ${key}:`, err.message);
+    }
+  }
+
+  if (rebuilt > 0 || expired > 0 || cleaned > 0) {
+    console.log(`⏱️ Mute timers reconstruidos: ${rebuilt} activos, ${expired} expirados, ${cleaned} limpiados`);
+  }
+}
+
 // Se ejecuta una sola vez cuando el bot se conecta exitosamente a Discord.
 // Arranca la blocklist, programa su refresco cada 6h, y migra roles viejos.
 client.on('ready', () => {
@@ -1037,6 +1448,10 @@ client.on('ready', () => {
   console.log(`✅ Bot receptor HTTP conectado como ${client.user.tag}`);
   refreshLiveBlocklist();
   setInterval(refreshLiveBlocklist, 6 * 60 * 60 * 1000);
+
+  // Reconstruir timers de mutes que sobrevivieron al restart (Fase 6)
+  // Sin esto, los mutes con expiración nunca se levantarían si el bot reinicia.
+  _rebuildMuteTimers();
 
   // Migración: renombrar roles Muted/Muted | NSFW al nuevo nombre en todos los servidores
   setTimeout(async () => {
@@ -1247,13 +1662,16 @@ client.on('messageCreate', async (message) => {
         const reason = args.slice(reasonStart).join(' ') || 'No reason provided';
         await target.roles.add(mutedRole, reason);
         if (muteDuration) scheduleMuteExpiry(target, mutedRole, muteDuration);
-        // Registrar mute activo
-        activeMutes.set(target.id + '_' + message.guild.id, {
+        // Registrar mute activo (memoria + DB)
+        const _muteKey = target.id + '_' + message.guild.id;
+        const _muteInfo = {
           reason,
           mutedBy: message.author.tag,
           mutedAt: Date.now(),
           expiresAt: muteDuration ? Date.now() + muteDuration : null,
-        });
+        };
+        activeMutes.set(_muteKey, _muteInfo);
+        persistActiveMute(_muteKey, _muteInfo);
         addLog('mod', { action: 'mute', moderator: message.author.tag, moderatorId: message.author.id, target: target.user.tag, targetId: target.id, reason, duration: muteDuration ? formatDuration(muteDuration) : 'permanent', guild: message.guild.name, guildId: message.guild.id });
         const durationNote = muteDuration ? ` Duration: **${formatDuration(muteDuration)}**${_durCapped ? ' *(max 30d)*' : ''}.` : '';
         await message.reply(`🔇 **${target.user.tag}** has been muted.${durationNote} Reason: ${reason}`);
@@ -1277,10 +1695,11 @@ client.on('messageCreate', async (message) => {
           return;
         }
         await target.roles.remove(mutedRole);
-        // Limpiar registro de mute activo y cancelar timer si existe
+        // Limpiar registro de mute activo y cancelar timer si existe (memoria + DB)
         const _unmuteKey = target.id + '_' + message.guild.id;
         if (muteTimers.has(_unmuteKey)) { clearTimeout(muteTimers.get(_unmuteKey)); muteTimers.delete(_unmuteKey); }
         activeMutes.delete(_unmuteKey);
+        _stmtDeleteMute.run(_unmuteKey);
         addLog('mod', { action: 'unmute', moderator: message.author.tag, moderatorId: message.author.id, target: target.user.tag, targetId: target.id, guild: message.guild.name, guildId: message.guild.id });
         await message.reply(`🔊 **${target.user.tag}** has been unmuted.`);
         return;
@@ -1445,11 +1864,11 @@ client.on('messageCreate', async (message) => {
 
         if (sub === 'on') {
           automodConfig[message.guild.id] = { ...cfg, enabled: true };
-          saveAutomod();
+          persistAutomodConfig(message.guild.id);
           await message.reply('✅ AutoMod is now **enabled** for this server.');
         } else if (sub === 'off') {
           automodConfig[message.guild.id] = { ...cfg, enabled: false };
-          saveAutomod();
+          persistAutomodConfig(message.guild.id);
           await message.reply('✅ AutoMod is now **disabled** for this server.');
         } else if (sub === 'logchannel') {
           const logCh = message.mentions.channels.first();
@@ -1458,7 +1877,7 @@ client.on('messageCreate', async (message) => {
             return;
           }
           automodConfig[message.guild.id] = { ...cfg, logChannelId: logCh.id };
-          saveAutomod();
+          persistAutomodConfig(message.guild.id);
           await message.reply(`✅ AutoMod alerts will be sent to <#${logCh.id}>.`);
         } else if (sub === 'modchannel') {
           const modCh = message.mentions.channels.first();
@@ -1467,25 +1886,25 @@ client.on('messageCreate', async (message) => {
             return;
           }
           automodConfig[message.guild.id] = { ...cfg, modAlertChannelId: modCh.id };
-          saveAutomod();
+          persistAutomodConfig(message.guild.id);
           await message.reply(`✅ Mod alert panel configured in <#${modCh.id}>. Moderators will receive alerts with Unmute and Ban buttons.`);
         } else if (sub === 'muteduration') {
           const durArg = args[1];
           if (durArg === 'off' || durArg === 'none' || durArg === '0') {
             automodConfig[message.guild.id] = { ...cfg, muteDuration: null };
-            saveAutomod();
+            persistAutomodConfig(message.guild.id);
             await message.reply('✅ Auto-mute duration removed. Mutes will be permanent until manually removed.');
           } else {
             const rawMs = parseDuration(durArg);
             if (!rawMs) {
-              await message.reply('❌ Invalid duration. Examples: `30m`, `1h`, `12h`, `1d`, `30d`. Use `off` to disable. Max: **30 days**.');
+              await message.reply('❌ Invalid duration. Examples: `30m`, `1h`, `12h`, `1d`, `3mo`. Use `off` to disable. Max: **3 months**.');
               return;
             }
             const ms = Math.min(rawMs, MAX_MUTE_MS);
             const capped = rawMs > MAX_MUTE_MS;
             automodConfig[message.guild.id] = { ...cfg, muteDuration: ms };
-            saveAutomod();
-            await message.reply(`✅ Auto-mute duration set to **${formatDuration(ms)}**${capped ? ' *(capped at 30 days)*' : ''}. Users will be automatically unmuted after this time.`);
+            persistAutomodConfig(message.guild.id);
+            await message.reply(`✅ Auto-mute duration set to **${formatDuration(ms)}**${capped ? ' *(capped at 3 months)*' : ''}. Users will be automatically unmuted after this time.`);
           }
         } else if (sub === 'status') {
           const status = cfg.enabled ? '🟢 Enabled' : '🔴 Disabled';
@@ -1541,7 +1960,10 @@ client.on('messageCreate', async (message) => {
         // Agrega solo los eventos que no estaban ya
         const added = eventTypes.filter((t) => !entry.events.includes(t));
         entry.events = [...new Set([...entry.events, ...eventTypes])];
-        saveChannels();
+
+        // Persiste a SQLite: upsert del canal + agrega los tipos nuevos
+        _stmtUpsertChannel.run(entry);
+        for (const t of added) _stmtAddSub.run(entry.channelId, t);
 
         const labels = added.map((t) => EVENT_LABELS[t]).join(', ');
         if (!added.length) {
@@ -1576,11 +1998,15 @@ client.on('messageCreate', async (message) => {
 
         const removed = eventTypes.filter((t) => entry.events.includes(t));
         entry.events = entry.events.filter((t) => !eventTypes.includes(t));
-        // Si no queda ningun evento, elimina la entrada
+
+        // Persiste a SQLite: quita las suscripciones removidas
+        for (const t of removed) _stmtRemoveSub.run(entry.channelId, t);
+
+        // Si no queda ningún evento, elimina la entrada completa (CASCADE limpia subs)
         if (!entry.events.length) {
           subscribedChannels = subscribedChannels.filter((c) => c.channelId !== message.channel.id);
+          _stmtDeleteChannel.run(entry.channelId);
         }
-        saveChannels();
 
         const labels = removed.map((t) => EVENT_LABELS[t]).join(', ');
         if (!removed.length) {
@@ -1900,10 +2326,11 @@ client.on('interactionCreate', async (interaction) => {
       for (const [, role] of mutedRoles) {
         await targetMember.roles.remove(role, `Unmuted by ${member.user.tag} via AutoMod panel`);
       }
-      // Limpiar registro de mute activo y cancelar timer si existe
+      // Limpiar registro de mute activo y cancelar timer si existe (memoria + DB)
       const _btnUnmuteKey = userId + '_' + guild.id;
       if (muteTimers.has(_btnUnmuteKey)) { clearTimeout(muteTimers.get(_btnUnmuteKey)); muteTimers.delete(_btnUnmuteKey); }
       activeMutes.delete(_btnUnmuteKey);
+      _stmtDeleteMute.run(_btnUnmuteKey);
       setImmune(userId, guild.id);
       const immuneUntil = new Date(Date.now() + 2 * 60 * 60 * 1000);
       const oldEmbed = interaction.message.embeds[0]?.data ?? {};
@@ -1991,6 +2418,7 @@ client.on('guildMemberUpdate', async (oldMember, newMember) => {
     const hadRecord = activeMutes.has(key) || muteTimers.has(key);
     if (muteTimers.has(key)) { clearTimeout(muteTimers.get(key)); muteTimers.delete(key); }
     activeMutes.delete(key);
+    _stmtDeleteMute.run(key);
     if (hadRecord) {
       console.log('Role muted removed manually from ' + newMember.user.tag + ' in ' + newMember.guild.name + ' -- records cleared');
     }
