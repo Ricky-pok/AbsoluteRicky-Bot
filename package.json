@@ -1,14 +1,14 @@
 {
   "name": "bot-receptor",
-  "version": "1.5.0",
-  "main": "index_bot_receptor_http.js",
+  "version": "1.6.0",
+  "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
-  "description": "",
+  "license": "MIT",
+  "description": "Discord bot for Plasma Survival / Graal Online Era community",
   "dependencies": {
     "@google-cloud/vision": "^5.3.6",
     "better-sqlite3": "^12.11.1",
