@@ -10,6 +10,7 @@ const { normalizeContent } = require('./lib');
 const { refreshLiveBlocklist, checkAutomod } = require('./automod');
 const { rebuildMuteTimers } = require('./mutes');
 const { dispatchCommand } = require('./commands');
+const { registerSlashCommands, handleSlashCommand } = require('./slash');
 
 // ── Estado interno ──────────────────────────────────────────────────────────
 let BOT_READY_AT = 0;
@@ -86,6 +87,9 @@ client.on('clientReady', () => {
   // Reconstruir timers de mutes que sobrevivieron al restart
   rebuildMuteTimers();
 
+  // Registrar slash commands globalmente (propagación ~5 min Discord-side)
+  registerSlashCommands();
+
   // Migración: renombrar roles "Muted" → "ABSOLUTE RICKY MUTE ROLE" en todos los guilds
   setTimeout(async () => {
     let renamed = 0;
@@ -159,8 +163,13 @@ client.on('messageCreate', async (message) => {
   }
 });
 
-// ── Discord event: interactionCreate (botones AutoMod panel) ────────────────
+// ── Discord event: interactionCreate (slash commands + botones AutoMod panel) ─
 client.on('interactionCreate', async (interaction) => {
+  // Slash commands
+  if (interaction.isChatInputCommand()) {
+    return handleSlashCommand(interaction);
+  }
+  // Botones (panel de AutoMod: Unmute / Ban)
   if (!interaction.isButton()) return;
   const { customId, guild, member } = interaction;
   if (!customId.startsWith('automod_unmute_') && !customId.startsWith('automod_ban_')) return;
