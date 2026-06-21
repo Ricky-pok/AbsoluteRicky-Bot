@@ -27,68 +27,68 @@ const EVENT_LABELS = {
 };
 
 // ── Definiciones (~15 comandos) ──────────────────────────────────────────────
+// Orden de registro = orden en el menú "Use App" del perfil del bot en mobile.
+// Discord IGNORA este orden en el autocomplete `/` (siempre alfabético).
 const commandDefs = [
+  // ⚡ Graal Timers (primero — el prefijo "a-" los pone arriba alfabéticamente)
+  new SlashCommandBuilder().setName('a-dc').setDescription('Countdown to next Double Coins event'),
+  new SlashCommandBuilder().setName('a-pvp').setDescription('Countdown to next PvP Arena event'),
+
+  // 🤖 General
   new SlashCommandBuilder().setName('ping').setDescription('Check bot latency'),
-
   new SlashCommandBuilder().setName('help').setDescription('Show command list'),
-
   new SlashCommandBuilder().setName('stats').setDescription('Server member + bot count'),
-
   new SlashCommandBuilder().setName('avatar').setDescription('Show a user avatar')
     .addUserOption(o => o.setName('user').setDescription('Target user (default: yourself)')),
-
   new SlashCommandBuilder().setName('purge').setDescription('Delete recent messages (1-50)')
     .addIntegerOption(o => o.setName('amount').setDescription('How many to delete').setRequired(true).setMinValue(1).setMaxValue(50))
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
 
-  new SlashCommandBuilder().setName('dc').setDescription('Countdown to next Double Coins event'),
-  new SlashCommandBuilder().setName('pvp').setDescription('Countdown to next PvP Arena event'),
-
+  // 🎮 Graal Events (subscripciones)
   new SlashCommandBuilder().setName('subscribe').setDescription('Subscribe this channel to Graal events')
     .addStringOption(o => o.setName('event').setRequired(true).setDescription('Event type').addChoices(...EVENT_CHOICES))
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels),
-
   new SlashCommandBuilder().setName('unsubscribe').setDescription('Unsubscribe this channel from Graal events')
     .addStringOption(o => o.setName('event').setRequired(true).setDescription('Event type').addChoices(...EVENT_CHOICES))
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels),
-
   new SlashCommandBuilder().setName('subscriptions').setDescription('Show current channel subscriptions'),
 
+  // 🔗 LinkGuard / AutoMod — single command (action dropdown + optional params)
+  // Para que aparezca como 1 sola entrada en el panel "Use this App" en vez de 6.
+  new SlashCommandBuilder().setName('linkguard').setDescription('Configure AutoMod / LinkGuard')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .addStringOption(o => o.setName('action').setDescription('What to do').setRequired(true).addChoices(
+      { name: 'Status (show config)',       value: 'status' },
+      { name: 'On (enable)',                 value: 'on' },
+      { name: 'Off (disable)',               value: 'off' },
+      { name: 'Set log channel',             value: 'logchannel' },
+      { name: 'Set mod alert channel',       value: 'modchannel' },
+      { name: 'Set auto-mute duration',      value: 'muteduration' },
+    ))
+    .addChannelOption(o => o.setName('channel').setDescription('Channel (only for logchannel / modchannel)').addChannelTypes(ChannelType.GuildText))
+    .addStringOption(o => o.setName('duration').setDescription('Duration (only for muteduration). Use "off" for permanent. e.g. 30m, 1h, 3mo')),
+
+  // 🛡️ Moderation
   new SlashCommandBuilder().setName('kick').setDescription('Kick a member')
     .addUserOption(o => o.setName('user').setDescription('Target').setRequired(true))
     .addStringOption(o => o.setName('reason').setDescription('Reason'))
     .setDefaultMemberPermissions(PermissionFlagsBits.KickMembers),
-
   new SlashCommandBuilder().setName('ban').setDescription('Ban a member')
     .addUserOption(o => o.setName('user').setDescription('Target').setRequired(true))
     .addStringOption(o => o.setName('reason').setDescription('Reason'))
     .setDefaultMemberPermissions(PermissionFlagsBits.BanMembers),
-
   new SlashCommandBuilder().setName('mute').setDescription('Mute a member')
     .addUserOption(o => o.setName('user').setDescription('Target').setRequired(true))
     .addStringOption(o => o.setName('duration').setDescription('e.g. 30m, 1h 30m, 1d, 3mo. Omit for permanent.'))
     .addStringOption(o => o.setName('reason').setDescription('Reason'))
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles),
-
   new SlashCommandBuilder().setName('unmute').setDescription('Remove mute from a member')
     .addUserOption(o => o.setName('user').setDescription('Target').setRequired(true))
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles),
-
   new SlashCommandBuilder().setName('mutes').setDescription('List active mutes in this server')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles),
 
-  new SlashCommandBuilder().setName('linkguard').setDescription('Configure AutoMod / LinkGuard')
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-    .addSubcommand(s => s.setName('on').setDescription('Enable AutoMod'))
-    .addSubcommand(s => s.setName('off').setDescription('Disable AutoMod'))
-    .addSubcommand(s => s.setName('status').setDescription('Show current config'))
-    .addSubcommand(s => s.setName('logchannel').setDescription('Where to send AutoMod logs')
-      .addChannelOption(o => o.setName('channel').setDescription('Target channel').setRequired(true).addChannelTypes(ChannelType.GuildText)))
-    .addSubcommand(s => s.setName('modchannel').setDescription('Where to post Unmute/Ban panel')
-      .addChannelOption(o => o.setName('channel').setDescription('Target channel').setRequired(true).addChannelTypes(ChannelType.GuildText)))
-    .addSubcommand(s => s.setName('muteduration').setDescription('Auto-mute duration (or "off" for permanent)')
-      .addStringOption(o => o.setName('duration').setDescription('e.g. 30m, 1h, 1d, 3mo, or "off"').setRequired(true))),
-
+  // 🔧 Owner-only
   new SlashCommandBuilder().setName('logs').setDescription('View recent bot logs (owner only)')
     .addStringOption(o => o.setName('filter').setDescription('Type').addChoices(
       { name: 'Moderation', value: 'mod' },
@@ -120,10 +120,12 @@ async function slashHelp(i) {
     title: '📋 AbsoluteRicky Bot — Slash Commands',
     description: 'Both `/commands` and `$ricky commands` work.',
     fields: [
-      { name: '🤖  General', value: '`/ping` `/help` `/stats` `/avatar` `/purge`', inline: false },
-      { name: '🛡️  Moderation', value: '`/kick` `/ban` `/mute` `/unmute` `/mutes`', inline: false },
-      { name: '🎮  Graal Online Era', value: '`/dc` `/pvp` `/subscribe` `/unsubscribe` `/subscriptions`', inline: false },
-      { name: '🔗  Admin', value: '`/linkguard` (on, off, logchannel, modchannel, muteduration, status)', inline: false },
+      { name: '⚡  Graal Timers', value: '`/a-dc` `/a-pvp`', inline: false },
+      { name: '🤖  General',      value: '`/ping` `/help` `/stats` `/avatar` `/purge`', inline: false },
+      { name: '🎮  Graal Events', value: '`/subscribe` `/unsubscribe` `/subscriptions`', inline: false },
+      { name: '🔗  LinkGuard',    value: '`/linkguard action:<status|on|off|logchannel|modchannel|muteduration>`', inline: false },
+      { name: '🛡️  Moderation',  value: '`/kick` `/ban` `/mute` `/unmute` `/mutes`', inline: false },
+      { name: '🔧  Owner',        value: '`/logs`', inline: false },
     ],
     footer: { text: 'AbsoluteRicky Bot' },
   };
@@ -373,33 +375,36 @@ async function slashMutes(i) {
 }
 
 async function slashLinkguard(i) {
-  const sub = i.options.getSubcommand();
+  const action = i.options.getString('action');
   const cfg = state.automodConfig[i.guild.id] || {};
 
-  if (sub === 'on') {
+  if (action === 'on') {
     state.automodConfig[i.guild.id] = { ...cfg, enabled: true };
     persistAutomodConfig(i.guild.id);
     return i.reply('✅ AutoMod is now **enabled** for this server.');
   }
-  if (sub === 'off') {
+  if (action === 'off') {
     state.automodConfig[i.guild.id] = { ...cfg, enabled: false };
     persistAutomodConfig(i.guild.id);
     return i.reply('✅ AutoMod is now **disabled** for this server.');
   }
-  if (sub === 'logchannel') {
+  if (action === 'logchannel') {
     const ch = i.options.getChannel('channel');
+    if (!ch) return i.reply({ content: '❌ Provide a `channel` option for `logchannel`.', ...EPHEMERAL });
     state.automodConfig[i.guild.id] = { ...cfg, logChannelId: ch.id };
     persistAutomodConfig(i.guild.id);
     return i.reply(`✅ AutoMod alerts will be sent to <#${ch.id}>.`);
   }
-  if (sub === 'modchannel') {
+  if (action === 'modchannel') {
     const ch = i.options.getChannel('channel');
+    if (!ch) return i.reply({ content: '❌ Provide a `channel` option for `modchannel`.', ...EPHEMERAL });
     state.automodConfig[i.guild.id] = { ...cfg, modAlertChannelId: ch.id };
     persistAutomodConfig(i.guild.id);
     return i.reply(`✅ Mod alert panel configured in <#${ch.id}>.`);
   }
-  if (sub === 'muteduration') {
+  if (action === 'muteduration') {
     const durStr = i.options.getString('duration');
+    if (!durStr) return i.reply({ content: '❌ Provide a `duration` option for `muteduration` (e.g. `30m`, `1h`, `3mo`, or `off`).', ...EPHEMERAL });
     if (['off','none','0'].includes(durStr.toLowerCase())) {
       state.automodConfig[i.guild.id] = { ...cfg, muteDuration: null };
       persistAutomodConfig(i.guild.id);
@@ -413,7 +418,7 @@ async function slashLinkguard(i) {
     persistAutomodConfig(i.guild.id);
     return i.reply(`✅ Auto-mute duration set to **${formatDuration(ms)}**${capped ? ' *(capped at 3 months)*' : ''}.`);
   }
-  if (sub === 'status') {
+  if (action === 'status') {
     return i.reply({ embeds: [{
       color: cfg.enabled ? 0x00cc66 : 0xff3333,
       title: '🛡️ AutoMod Status',
@@ -459,8 +464,8 @@ async function handleSlashCommand(interaction) {
       case 'stats':         return slashStats(interaction);
       case 'avatar':        return slashAvatar(interaction);
       case 'purge':         return slashPurge(interaction);
-      case 'dc':            return slashDC(interaction);
-      case 'pvp':           return slashPvP(interaction);
+      case 'a-dc':          return slashDC(interaction);
+      case 'a-pvp':         return slashPvP(interaction);
       case 'subscribe':     return slashSubscribe(interaction);
       case 'unsubscribe':   return slashUnsubscribe(interaction);
       case 'subscriptions': return slashSubscriptions(interaction);
