@@ -1,9 +1,9 @@
-// Handlers de eventos de Discord (ready, messageCreate, interactionCreate,
-// guildCreate, guildMemberUpdate) + helpers de broadcast (sendAlert, broadcastEvent,
-// handleAlert). Centraliza toda la interacción del bot con Discord en runtime.
+// Handlers de eventos de Discord (clientReady, messageCreate, interactionCreate,
+// guildCreate, guildDelete, guildMemberUpdate) + helpers de broadcast (sendAlert,
+// broadcastEvent, handleAlert). Centraliza toda la interacción del bot con Discord.
 const { PermissionFlagsBits } = require('discord.js');
 const { client } = require('./client');
-const { stmts } = require('./db');
+const { db, stmts } = require('./db');
 const { state, addEvent, addLog, setImmune } = require('./state');
 const { env, PREFIX, PREFIX_SHORT } = require('./config');
 const { normalizeContent } = require('./lib');
@@ -76,8 +76,8 @@ async function handleAlert({ type, title, body, roleId, decorate }) {
   return addEvent(type, title, body, { source: 'http-api' });
 }
 
-// ── Discord event: ready ────────────────────────────────────────────────────
-client.on('ready', () => {
+// ── Discord event: clientReady (antes 'ready' — renombrado en discord.js v15) ─
+client.on('clientReady', () => {
   BOT_READY_AT = Date.now();
   console.log(`✅ Bot receptor HTTP conectado como ${client.user.tag}`);
   refreshLiveBlocklist();
@@ -261,6 +261,52 @@ client.on('guildCreate', async (guild) => {
     console.log(`✅ Joined guild: ${guild.name} (${guild.id})`);
   } catch (err) {
     console.error(`❌ guildCreate message failed in ${guild.name}:`, err.message);
+  }
+});
+
+// ── Discord event: guildDelete (limpia datos del server cuando nos sacan) ────
+// Cuando el bot es removido de un guild (kick/ban/server deleted), borramos:
+//  - automod_config para ese guild
+//  - subscribed_channels (CASCADE limpia channel_event_subscriptions)
+//  - active_mutes (memoria + DB)
+//  - estado en memoria (state.automodConfig, state.subscribedChannels, etc.)
+// Si no, la DB se va llenando de configs huérfanas con el tiempo.
+client.on('guildDelete', (guild) => {
+  try {
+    const guildId = guild.id;
+
+    // 1. AutoMod config
+    const automodDel = db.prepare('DELETE FROM automod_config WHERE guild_id = ?').run(guildId);
+    delete state.automodConfig[guildId];
+
+    // 2. Subscribed channels (CASCADE limpia channel_event_subscriptions)
+    const channelsDel = db.prepare('DELETE FROM subscribed_channels WHERE guild_id = ?').run(guildId);
+    state.subscribedChannels = state.subscribedChannels.filter(c => c.guildId !== guildId);
+
+    // 3. Active mutes para ese guild
+    const mutesDel = db.prepare('DELETE FROM active_mutes WHERE guild_id = ?').run(guildId);
+    for (const [key, info] of [...state.activeMutes]) {
+      if (key.endsWith('_' + guildId)) {
+        state.activeMutes.delete(key);
+        if (state.muteTimers.has(key)) {
+          clearTimeout(state.muteTimers.get(key));
+          state.muteTimers.delete(key);
+        }
+      }
+    }
+
+    addLog('mod', {
+      action: 'guild_delete_cleanup',
+      guild: guild.name,
+      guildId,
+      automodCleared: automodDel.changes,
+      channelsCleared: channelsDel.changes,
+      mutesCleared: mutesDel.changes,
+    });
+
+    console.log(`🧹 Cleaned up guild ${guild.name} (${guildId}): ${automodDel.changes} automod, ${channelsDel.changes} channels, ${mutesDel.changes} mutes`);
+  } catch (err) {
+    console.error(`❌ guildDelete cleanup failed for ${guild.name}:`, err.message);
   }
 });
 
