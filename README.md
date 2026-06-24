@@ -1,6 +1,6 @@
 # AbsoluteRicky Bot
 
-[![Version](https://img.shields.io/badge/version-1.6.0-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-1.7.2-blue.svg)]()
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)]()
 [![Discord.js](https://img.shields.io/badge/discord.js-v14-7289DA.svg)]()
