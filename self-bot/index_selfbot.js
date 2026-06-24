@@ -18,7 +18,7 @@ if (!TOKEN_DE_USUARIO) {
 const ID_VALIDOS = [
   '1519054980848418988', // Double Coins
   '1308035892912328757', // Plasma Event
-  '1237946463560929320', // PvP
+  '1519054899747491952', // PvP (was 1237946463560929320 until jun 24 2026)
 ];
 
 // Canal original de Plasma Survival que se monitorea
