@@ -64,12 +64,23 @@ async function broadcastEvent(eventType, content) {
   }));
 }
 
+// Ventana anti-duplicado para HTTP alerts (los bots fuente a veces envían 2x)
+const HTTP_ALERT_DEDUP_MS = { doublecoins: 60_000, pvp_normal: 60_000 };
+
 // Pipeline completo para una alerta HTTP API:
 // 1. sendAlert al canal principal
 // 2. Marca _recentEventTypes (dedupe del messageCreate handler)
 // 3. broadcastEvent a canales suscritos
 // 4. addEvent en SQLite
 async function handleAlert({ type, title, body, roleId, decorate }) {
+  const dedupWindow = HTTP_ALERT_DEDUP_MS[type];
+  if (dedupWindow) {
+    const lastSeen = _recentEventTypes.get(type);
+    if (lastSeen && Date.now() - lastSeen < dedupWindow) {
+      console.log(`⏭️ Skipped duplicate HTTP alert ${type} (within ${dedupWindow / 1000}s window)`);
+      return { skipped: true, reason: 'duplicate', type };
+    }
+  }
   const content = decorate ? decorate(body) : body;
   await sendAlert(roleId, content);
   _recentEventTypes.set(type, Date.now());

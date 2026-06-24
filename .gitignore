@@ -5,3 +5,15 @@ logs.json
 events.json
 http-api.log
 *.log
+
+# SQLite (runtime)
+bot.db
+bot.db-shm
+bot.db-wal
+
+# Backups
+*.bak
+*.pre-*-bak
+
+# OS
+.DS_Store
