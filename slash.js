@@ -6,7 +6,7 @@ const {
 } = require('discord.js');
 const { client } = require('./client');
 const { db, stmts } = require('./db');
-const { state, addLog, persistAutomodConfig, persistActiveMute } = require('./state');
+const { state, addLog, persistAutomodConfig, persistActiveMute, logAutomodAudit, getLatestAutomodAudit } = require('./state');
 const { parseDuration, formatDuration } = require('./lib');
 const { getOrCreateMutedRole, scheduleMuteExpiry } = require('./mutes');
 const { env, MAX_MUTE_MS } = require('./config');
@@ -381,11 +381,19 @@ async function slashLinkguard(i) {
   if (action === 'on') {
     state.automodConfig[i.guild.id] = { ...cfg, enabled: true };
     persistAutomodConfig(i.guild.id);
+    logAutomodAudit({
+      guildId: i.guild.id, guildName: i.guild.name,
+      action: 'enabled', actorId: i.user.id, actorTag: i.user.tag,
+    });
     return i.reply('✅ AutoMod is now **enabled** for this server.');
   }
   if (action === 'off') {
     state.automodConfig[i.guild.id] = { ...cfg, enabled: false };
     persistAutomodConfig(i.guild.id);
+    logAutomodAudit({
+      guildId: i.guild.id, guildName: i.guild.name,
+      action: 'disabled', actorId: i.user.id, actorTag: i.user.tag,
+    });
     return i.reply('✅ AutoMod is now **disabled** for this server.');
   }
   if (action === 'logchannel') {
@@ -419,6 +427,10 @@ async function slashLinkguard(i) {
     return i.reply(`✅ Auto-mute duration set to **${formatDuration(ms)}**${capped ? ' *(capped at 3 months)*' : ''}.`);
   }
   if (action === 'status') {
+    const lastAudit = getLatestAutomodAudit(i.guild.id);
+    const lastChange = lastAudit
+      ? `${lastAudit.action} by ${lastAudit.actorTag || 'unknown'} <t:${Math.floor(new Date(lastAudit.at).getTime()/1000)}:R>`
+      : 'No changes recorded';
     return i.reply({ embeds: [{
       color: cfg.enabled ? 0x00cc66 : 0xff3333,
       title: '🛡️ AutoMod Status',
@@ -427,6 +439,7 @@ async function slashLinkguard(i) {
         { name: 'Log Channel', value: cfg.logChannelId ? `<#${cfg.logChannelId}>` : 'Not configured', inline: true },
         { name: 'Mod Alert Channel', value: cfg.modAlertChannelId ? `<#${cfg.modAlertChannelId}>` : 'Not configured', inline: true },
         { name: 'Auto-mute Duration', value: cfg.muteDuration ? formatDuration(cfg.muteDuration) : 'Permanent', inline: true },
+        { name: 'Last change', value: lastChange, inline: false },
         { name: 'Detects', value: '• NSFW / Adult sites\n• Scam links\n• NSFW Discord invites', inline: false },
       ],
     }] });

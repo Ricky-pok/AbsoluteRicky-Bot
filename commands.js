@@ -2,7 +2,7 @@
 // y llama al handler correspondiente. Cada handler recibe (message, args) y devuelve.
 const { client } = require('./client');
 const { stmts } = require('./db');
-const { state, addLog, persistAutomodConfig, persistActiveMute, isRateLimited } = require('./state');
+const { state, addLog, persistAutomodConfig, persistActiveMute, logAutomodAudit, getLatestAutomodAudit, isRateLimited } = require('./state');
 const { parseDuration, formatDuration } = require('./lib');
 const { getOrCreateMutedRole, scheduleMuteExpiry } = require('./mutes');
 const { env, MAX_MUTE_MS } = require('./config');
@@ -292,10 +292,18 @@ async function cmdLinkGuard(message, args) {
   if (sub === 'on') {
     state.automodConfig[message.guild.id] = { ...cfg, enabled: true };
     persistAutomodConfig(message.guild.id);
+    logAutomodAudit({
+      guildId: message.guild.id, guildName: message.guild.name,
+      action: 'enabled', actorId: message.author.id, actorTag: message.author.tag,
+    });
     await message.reply('✅ AutoMod is now **enabled** for this server.');
   } else if (sub === 'off') {
     state.automodConfig[message.guild.id] = { ...cfg, enabled: false };
     persistAutomodConfig(message.guild.id);
+    logAutomodAudit({
+      guildId: message.guild.id, guildName: message.guild.name,
+      action: 'disabled', actorId: message.author.id, actorTag: message.author.tag,
+    });
     await message.reply('✅ AutoMod is now **disabled** for this server.');
   } else if (sub === 'logchannel') {
     const logCh = message.mentions.channels.first();
@@ -330,6 +338,10 @@ async function cmdLinkGuard(message, args) {
     const status = cfg.enabled ? '🟢 Enabled' : '🔴 Disabled';
     const logCh = cfg.logChannelId ? `<#${cfg.logChannelId}>` : 'Not configured';
     const modChDisplay = cfg.modAlertChannelId ? `<#${cfg.modAlertChannelId}>` : 'Not configured';
+    const lastAudit = getLatestAutomodAudit(message.guild.id);
+    const lastChange = lastAudit
+      ? `${lastAudit.action} by ${lastAudit.actorTag || 'unknown'} <t:${Math.floor(new Date(lastAudit.at).getTime()/1000)}:R>`
+      : 'No changes recorded';
     await message.reply({ embeds: [{
       color: cfg.enabled ? 0x00cc66 : 0xff3333,
       title: '🛡️ AutoMod Status',
@@ -338,6 +350,7 @@ async function cmdLinkGuard(message, args) {
         { name: 'Log Channel', value: logCh, inline: true },
         { name: 'Mod Alert Channel', value: modChDisplay, inline: true },
         { name: 'Auto-mute Duration', value: cfg.muteDuration ? formatDuration(cfg.muteDuration) : 'Permanent', inline: true },
+        { name: 'Last change', value: lastChange, inline: false },
         { name: 'Detects', value: '• NSFW / Adult sites\n• Scam links\n• NSFW Discord invites', inline: false },
       ],
     }] });
