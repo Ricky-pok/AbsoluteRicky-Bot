@@ -69,10 +69,21 @@ db.exec(`
     expires_at INTEGER
   );
 
-  CREATE INDEX IF NOT EXISTS idx_events_type        ON events(type);
-  CREATE INDEX IF NOT EXISTS idx_events_created_at  ON events(created_at DESC);
-  CREATE INDEX IF NOT EXISTS idx_logs_type          ON logs(type);
-  CREATE INDEX IF NOT EXISTS idx_active_mutes_guild ON active_mutes(guild_id);
+  CREATE TABLE IF NOT EXISTS automod_audit (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id   TEXT NOT NULL,
+    guild_name TEXT,
+    action     TEXT NOT NULL,
+    actor_id   TEXT,
+    actor_tag  TEXT,
+    at         TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_events_type         ON events(type);
+  CREATE INDEX IF NOT EXISTS idx_events_created_at   ON events(created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_logs_type           ON logs(type);
+  CREATE INDEX IF NOT EXISTS idx_active_mutes_guild  ON active_mutes(guild_id);
+  CREATE INDEX IF NOT EXISTS idx_automod_audit_guild ON automod_audit(guild_id, at DESC);
 `);
 
 console.log(`✅ SQLite ready: ${DB_FILE}`);
@@ -122,6 +133,16 @@ const stmts = {
     VALUES (@key, @userId, @guildId, @reason, @mutedBy, @mutedAt, @expiresAt)
   `),
   deleteMute: db.prepare(`DELETE FROM active_mutes WHERE key = ?`),
+  insertAutomodAudit: db.prepare(`
+    INSERT INTO automod_audit (guild_id, guild_name, action, actor_id, actor_tag, at)
+    VALUES (@guildId, @guildName, @action, @actorId, @actorTag, @at)
+  `),
+  getLatestAutomodAudit: db.prepare(`
+    SELECT action, actor_tag AS actorTag, at
+    FROM automod_audit
+    WHERE guild_id = ?
+    ORDER BY at DESC LIMIT 1
+  `),
 };
 
 // ── Migración one-shot JSON → SQLite ────────────────────────────────────────

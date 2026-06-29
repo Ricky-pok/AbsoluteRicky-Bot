@@ -110,6 +110,22 @@ function persistAutomodConfig(guildId) {
   });
 }
 
+// Registra un cambio de enable/disable de AutoMod (no se trimea — historial completo)
+function logAutomodAudit({ guildId, guildName, action, actorId, actorTag }) {
+  stmts.insertAutomodAudit.run({
+    guildId,
+    guildName: guildName || null,
+    action,
+    actorId:  actorId  || null,
+    actorTag: actorTag || null,
+    at: new Date().toISOString(),
+  });
+}
+
+function getLatestAutomodAudit(guildId) {
+  return stmts.getLatestAutomodAudit.get(guildId) || null;
+}
+
 // Persiste un mute activo en la DB
 function persistActiveMute(key, info) {
   const [userId, guildId] = key.split('_');
@@ -204,6 +220,7 @@ function isRateLimited(userId) {
 module.exports = {
   state,
   persistAutomodConfig, persistActiveMute,
+  logAutomodAudit, getLatestAutomodAudit,
   addEvent, addLog,
   isImmune, setImmune,
   isRateLimited,
