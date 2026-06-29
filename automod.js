@@ -231,8 +231,10 @@ async function extractTextFromImage(imageUrl) {
   }
 }
 
-// Versión RESTRINGIDA para texto de OCR: no aplica SCAM_TEXT_PATTERNS porque
-// frases tipo "Claim your reward" aparecen en apps legítimas (ej: Graal Online).
+// Versión para OCR: chequea dominios primero. Como fallback, aplica
+// SCAM_TEXT_PATTERNS con regla híbrida — un solo patrón da falsos positivos
+// (ej: "Claim your reward" en Graal Online), pero ≥2 patrones distintos, o 1
+// patrón + dominio en TLD sospechoso, son señal alta de scam.
 async function detectViolationFromOCR(text) {
   const urls = text.match(/https?:\/\/[^\s<>"']+/gi) || [];
   for (const rawUrl of urls) {
@@ -261,6 +263,28 @@ async function detectViolationFromOCR(text) {
     }
     if (isInLiveBlocklist(domain)) return { type: 'scam', label: 'Known Malicious Domain', url: domain };
   }
+
+  const patternHits = SCAM_TEXT_PATTERNS.filter(p => p.re.test(text));
+  if (patternHits.length >= 2) {
+    const labels = patternHits.slice(0, 3).map(p => p.label).join(', ');
+    return {
+      type: 'scam',
+      label: `OCR Scam Patterns (${patternHits.length}): ${labels}`,
+      url: plainDomains[0] || urls[0] || null,
+    };
+  }
+  if (patternHits.length === 1) {
+    const SUSPICIOUS_TLDS = /\.(win|xyz|site|online|app)$/i;
+    const suspDomain = plainDomains.find(d => SUSPICIOUS_TLDS.test(d));
+    if (suspDomain) {
+      return {
+        type: 'scam',
+        label: `OCR Scam Pattern + Suspicious TLD: ${patternHits[0].label}`,
+        url: suspDomain,
+      };
+    }
+  }
+
   return null;
 }
 
